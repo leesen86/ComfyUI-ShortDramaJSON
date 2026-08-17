@@ -7,8 +7,9 @@
 把工作流放到 `ComfyUI/custom_nodes/ComfyUI-ShortDramaJSON`，重启 ComfyUI。
 
 1. 在「角色场景图绑定」粘贴短剧 JSON，按角色/场景名接参考图
-2. 「分镜选择/循环」设开始/结束镜，输出当前镜提示词与时长
-3. 单镜：只跑一镜即可；多镜：接「续跑下一镜」自动 Queue，最后用「本批全部分镜拼接」按序成片
+2. 「分镜选择/循环」设开始/结束镜；**MiniMax 的 prompt 必须接本节点的 `shot_prompt`**（不要接绑定节点的完整 `prompt_json`）
+3. 把 `shot_prompt` 再接到「角色场景图绑定」的 `shot_prompt`：本镜未引用的 `<Picture N>` 参考图会被置空，不送进 MiniMax
+4. 时长接本节点的 `duration`（例如分镜3为 3s）；单镜设 `3:3`，多镜接「续跑下一镜」自动 Queue，最后用「本批全部分镜拼接」
 
 示例工作流见 `example/`。
 

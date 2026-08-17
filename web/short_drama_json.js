@@ -75,7 +75,12 @@ function syncBinderSockets(node, count) {
   const keepIn = new Map();
   const keepOut = new Map();
   for (const inp of node.inputs || []) {
-    if (/^Picture_\d+$/.test(inp.name) && inp.link != null) keepIn.set(inp.name, inp.link);
+    if (
+      (inp.name === "prompt_json" || inp.name === "shot_prompt" || /^Picture_\d+$/.test(inp.name)) &&
+      inp.link != null
+    ) {
+      keepIn.set(inp.name, inp.link);
+    }
   }
   for (const out of node.outputs || []) {
     if ((/^Picture_\d+$/.test(out.name) || out.name === "总时长" || out.name === "prompt_json") && out.links?.length) {
@@ -97,6 +102,7 @@ function syncBinderSockets(node, count) {
   };
 
   if (!node.inputs?.some((x) => x.name === "prompt_json")) node.addInput("prompt_json", "STRING");
+  if (!node.inputs?.some((x) => x.name === "shot_prompt")) node.addInput("shot_prompt", "STRING");
   if (!node.outputs?.some((x) => x.name === "prompt_json")) node.addOutput("prompt_json", "STRING");
   for (let i = 1; i <= n; i++) {
     const name = `Picture_${i}`;
@@ -121,10 +127,18 @@ function syncBinderSockets(node, count) {
 
   const byNameIn = Object.fromEntries((node.inputs || []).map((s) => [s.name, s]));
   const byNameOut = Object.fromEntries((node.outputs || []).map((s) => [s.name, s]));
-  node.inputs = ["prompt_json", ...Array.from({ length: n }, (_, i) => `Picture_${i + 1}`)]
+  const keepExtraIn = (node.inputs || []).filter(
+    (s) => s.name !== "prompt_json" && s.name !== "shot_prompt" && !/^Picture_\d+$/.test(s.name)
+  );
+  // shot_prompt 放最后，避免插入中间挤乱 Picture 槽位索引
+  node.inputs = [
+    "prompt_json",
+    ...Array.from({ length: n }, (_, i) => `Picture_${i + 1}`),
+    "shot_prompt",
+  ]
     .map((name) => byNameIn[name])
     .filter(Boolean)
-    .concat((node.inputs || []).filter((s) => s.name !== "prompt_json" && !/^Picture_\d+$/.test(s.name)));
+    .concat(keepExtraIn);
   node.outputs = [
     "prompt_json",
     ...Array.from({ length: n }, (_, i) => `Picture_${i + 1}`),

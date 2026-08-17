@@ -24,6 +24,12 @@ SCENE_KEYS = ("场景图片", "场景档案")
 _NUM = re.compile(r"(\d+(?:\.\d+)?)")
 _TAG = re.compile(r"<([^<>]+)>")
 _PIC = re.compile(r"^Picture_(\d+)$")
+_PIC_REF = re.compile(r"[<［\[]\s*Picture\s*(\d+)\s*[>］\]]", re.I)
+
+
+def used_picture_indices(shot_prompt: str) -> set[int]:
+    """从 shot_prompt 里收集 <Picture N>；空集合表示本镜不需要任何参考图。"""
+    return {int(m) for m in _PIC_REF.findall(shot_prompt or "")}
 
 
 class _FlexReturns(tuple):
@@ -231,19 +237,17 @@ def filter_shot_context(data: dict[str, Any], clips: list) -> dict[str, Any]:
                 if spk in roles and spk not in used_roles:
                     used_roles.append(spk)
 
+    # 画面/对白未点名的角色不要回退成「全员」
     if roles:
-        out["角色图片"] = {k: roles[k] for k in used_roles if k in roles} or dict(roles)
+        filtered_roles = {k: roles[k] for k in used_roles if k in roles}
+        if filtered_roles:
+            out["角色图片"] = filtered_roles
     if scenes:
-        out["场景图片"] = {k: scenes[k] for k in used_scenes if k in scenes} or {
-            k: scenes[k] for k in list(scenes)[:1]
-        }
+        filtered_scenes = {k: scenes[k] for k in used_scenes if k in scenes}
+        out["场景图片"] = filtered_scenes or {k: scenes[k] for k in list(scenes)[:1]}
 
-    scene_names = "、".join((out.get("场景图片") or {})) or "（无）"
-    role_names = "、".join((out.get("角色图片") or {})) or "（无）"
-    rule = str(out.get("镜头规则") or "")
-    extra = f"本分镜仅用场景【{scene_names}】与角色【{role_names}】；引用写 <名称>。"
-    out["镜头规则"] = f"{rule}；{extra}" if rule else extra
-    out["当前场景"] = scene_names
+    # 不改写「镜头规则」：工具只裁剪本镜用到的角色/场景，文案由用户 JSON 决定
+    out["当前场景"] = "、".join((out.get("场景图片") or {})) or "（无）"
     return out
 
 
@@ -298,7 +302,17 @@ class ShortDramaJSONSlotParser:
                 ),
                 "prompt_json": ("STRING", {"forceInput": True, "multiline": True, "default": ""}),
             },
-            "optional": {},
+            "optional": {
+                "shot_prompt": (
+                    "STRING",
+                    {
+                        "forceInput": True,
+                        "multiline": True,
+                        "default": "",
+                        "tooltip": "接「分镜选择/循环」的 shot_prompt；只放行本镜引用的 <Picture N>，其余参考图不送入下游。",
+                    },
+                ),
+            },
         }
 
     RETURN_TYPES = _FLEX_RETURNS
@@ -318,16 +332,24 @@ class ShortDramaJSONSlotParser:
         _apply_binder_schema(n)
         return True
 
-    def run(self, prompt_json, 总时长=10.0, **kwargs):
+    def run(self, prompt_json, 总时长=10.0, shot_prompt=None, **kwargs):
         data = _parse_json(prompt_json)
         n = len(discover_slots(data)) or _slot_count_from_names(kwargs)
         _apply_binder_schema(n)
-        pics = tuple(
-            kwargs.get(f"Picture_{i}") if kwargs.get(f"Picture_{i}") is not None else _empty_image()
-            for i in range(1, n + 1)
-        )
+        gate = None
+        if isinstance(shot_prompt, str) and shot_prompt.strip():
+            gate = used_picture_indices(shot_prompt)
+        pics = []
+        for i in range(1, n + 1):
+            img = kwargs.get(f"Picture_{i}")
+            if img is None:
+                img = _empty_image()
+            # 接了 shot_prompt 时：未引用槽位送空图，避免角色参考图泄漏进 MiniMax
+            if gate is not None and i not in gate:
+                img = _empty_image()
+            pics.append(img)
         dur = 总时长 if 总时长 is not None else kwargs.get("时长微调", 10.0)
-        return (prompt_json or "",) + pics + (float(dur),)
+        return (prompt_json or "",) + tuple(pics) + (float(dur),)
 
 
 class ShortDramaJSONShotSelector:
