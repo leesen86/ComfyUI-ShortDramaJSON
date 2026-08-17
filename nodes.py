@@ -28,8 +28,37 @@ _PIC_REF = re.compile(r"[<［\[]\s*Picture\s*(\d+)\s*[>］\]]", re.I)
 
 
 def used_picture_indices(shot_prompt: str) -> set[int]:
-    """从 shot_prompt 里收集 <Picture N>；空集合表示本镜不需要任何参考图。"""
+    """从 shot_prompt 里收集 <Picture N>；空集合表示未解析到任何参考图编号。"""
     return {int(m) for m in _PIC_REF.findall(shot_prompt or "")}
+
+
+def used_picture_indices_by_name(shot_prompt: str, slots: list[dict[str, Any]]) -> set[int]:
+    """按 <角色/场景名> 回退解析 Picture 槽位。"""
+    pics = {s["name"]: int(s["picture"]) for s in slots if s.get("name") and s.get("picture")}
+    if not pics:
+        return set()
+    hit = set()
+    for tag in _TAG.findall(shot_prompt or ""):
+        name = str(tag).strip()
+        if name in pics:
+            hit.add(pics[name])
+    return hit
+
+
+def resolve_picture_gate(shot_prompt: str | None, data: dict[str, Any]) -> set[int] | None:
+    """
+    返回本镜应放行的 Picture 编号集合。
+    None = 不过滤（全部放行）；set = 只放行这些槽。
+    无尖括号标签时不过滤，避免接错 shot_name 时把参考图全清掉。
+    """
+    if not isinstance(shot_prompt, str) or not shot_prompt.strip():
+        return None
+    gate = used_picture_indices(shot_prompt)
+    if not gate:
+        gate = used_picture_indices_by_name(shot_prompt, discover_slots(data))
+    if not gate and not _TAG.findall(shot_prompt):
+        return None
+    return gate
 
 
 class _FlexReturns(tuple):
@@ -163,12 +192,15 @@ def override_shot_duration(csv: str, index: int, fallback: float) -> float:
     return v if v > 0 else float(fallback)
 
 
+_CLIP_TEXT_KEYS = ("场景", "镜头", "画面", "声音", "构图", "光影", "衔接", "禁止", "对白")
+
+
 def _clip_blob(clips: list) -> str:
     parts: list[str] = []
     for c in clips:
         if not isinstance(c, dict):
             continue
-        for key in ("场景", "镜头", "画面", "声音", "对白"):
+        for key in _CLIP_TEXT_KEYS:
             val = c.get(key)
             if isinstance(val, dict):
                 parts.extend(str(x) for x in (*val.keys(), *val.values()))
@@ -214,7 +246,7 @@ def _expand_clips_refs(clips: list, pics: dict[str, int]) -> list:
             out.append(c)
             continue
         nc = dict(c)
-        for key in ("场景", "镜头", "画面", "声音"):
+        for key in ("场景", "镜头", "画面", "声音", "构图", "光影", "衔接", "禁止"):
             if isinstance(nc.get(key), str):
                 nc[key] = _expand_ref_tags(nc[key], pics)
         out.append(nc)
@@ -266,13 +298,89 @@ def build_shot_prompt(data: dict[str, Any], index: int) -> tuple[str, str, int, 
 
 
 def _latest_mp4(output_dir: str, prefix: str) -> str | None:
-    files = [
-        f
-        for pat in (os.path.join(output_dir, f"{prefix}*.mp4"), os.path.join(output_dir, "**", f"{prefix}*.mp4"))
-        for f in glob.glob(pat, recursive=True)
-        if os.path.isfile(f) and "merged" not in os.path.basename(f).lower()
-    ]
+    """按文件名前缀取最新 mp4；避免 ShortDrama_分镜1 误匹配到 分镜10。"""
+    pref = str(prefix or "")
+    base_pref = os.path.basename(pref)
+    files = []
+    for pat in (os.path.join(output_dir, f"{pref}*.mp4"), os.path.join(output_dir, "**", f"{pref}*.mp4")):
+        for f in glob.glob(pat, recursive=True):
+            if not os.path.isfile(f):
+                continue
+            name = os.path.basename(f)
+            if "merged" in name.lower():
+                continue
+            if not name.startswith(base_pref):
+                continue
+            rest = name[len(base_pref) :]
+            # 前缀后须结束或接 _ / - / .，不能再跟数字（防止 分镜1 吃到 分镜10）
+            if rest and rest[0].isdigit():
+                continue
+            files.append(f)
     return max(files, key=os.path.getmtime) if files else None
+
+
+def _shot_names_for_batch(prompt_json: str, start: int, end: int) -> list[str]:
+    """本批序号 start..end（含）→ JSON 分镜名列表。分镜名≠序号。"""
+    shots = list_shots(_parse_json(prompt_json))
+    if not shots:
+        raise ValueError("JSON 中没有可用的分镜序列")
+    names = []
+    for i in range(int(start), int(end) + 1):
+        if i < 1 or i > len(shots):
+            raise ValueError(f"分镜序号越界: {i}（共 {len(shots)} 镜）")
+        names.append(shots[i - 1][0])
+    return names
+
+
+def _prompt_get_node(prompt: dict, node_id) -> dict | None:
+    if not isinstance(prompt, dict):
+        return None
+    if node_id in prompt and isinstance(prompt[node_id], dict):
+        return prompt[node_id]
+    key = str(node_id)
+    node = prompt.get(key)
+    return node if isinstance(node, dict) else None
+
+
+def _resolve_graph_string(prompt: dict, value, _depth: int = 0) -> str:
+    """解析 API prompt 里的字符串；连线多为 [node_id, slot]。"""
+    if _depth > 8:
+        return ""
+    if isinstance(value, str):
+        return value
+    if not (isinstance(value, (list, tuple)) and value):
+        return ""
+    src = _prompt_get_node(prompt, value[0])
+    if not src:
+        return ""
+    inputs = src.get("inputs") or {}
+    for key in ("value", "string", "text", "prompt_json", "STRING"):
+        if key not in inputs:
+            continue
+        got = _resolve_graph_string(prompt, inputs[key], _depth + 1) if not isinstance(inputs[key], str) else inputs[key]
+        if isinstance(got, str) and got.strip():
+            return got
+    for v in inputs.values():
+        if isinstance(v, str) and len(v.strip()) > 2:
+            return v
+        if isinstance(v, (list, tuple)):
+            got = _resolve_graph_string(prompt, v, _depth + 1)
+            if got.strip():
+                return got
+    return ""
+
+
+def _prompt_json_from_workflow(prompt: dict | None) -> str:
+    """从同图「分镜选择」自动取 prompt_json，拼接节点无需再接线。"""
+    if not isinstance(prompt, dict):
+        return ""
+    for node in prompt.values():
+        if not isinstance(node, dict) or node.get("class_type") != "ShortDramaJSONShotSelector":
+            continue
+        text = _resolve_graph_string(prompt, (node.get("inputs") or {}).get("prompt_json"))
+        if text.strip():
+            return text
+    return ""
 
 
 def clamp_run(total: int, start: int, end: int) -> tuple[int, int]:
@@ -336,15 +444,13 @@ class ShortDramaJSONSlotParser:
         data = _parse_json(prompt_json)
         n = len(discover_slots(data)) or _slot_count_from_names(kwargs)
         _apply_binder_schema(n)
-        gate = None
-        if isinstance(shot_prompt, str) and shot_prompt.strip():
-            gate = used_picture_indices(shot_prompt)
+        gate = resolve_picture_gate(shot_prompt, data)
         pics = []
         for i in range(1, n + 1):
             img = kwargs.get(f"Picture_{i}")
             if img is None:
                 img = _empty_image()
-            # 接了 shot_prompt 时：未引用槽位送空图，避免角色参考图泄漏进 MiniMax
+            # 接了有效 shot_prompt 时：未引用槽位送空图，避免角色参考图泄漏进 MiniMax
             if gate is not None and i not in gate:
                 img = _empty_image()
             pics.append(img)
@@ -358,8 +464,8 @@ class ShortDramaJSONShotSelector:
         return {
             "required": {
                 "prompt_json": ("STRING", {"forceInput": True, "multiline": True, "default": ""}),
-                "开始分镜": ("INT", {"default": 1, "min": 1, "max": 64, "step": 1, "tooltip": "从第几镜开始（含）。不能大于结束分镜。"}),
-                "结束分镜": ("INT", {"default": 1, "min": 1, "max": 64, "step": 1, "tooltip": "跑到第几镜（含）。2:2 只跑第2镜。"}),
+                "开始分镜": ("INT", {"default": 1, "min": 1, "max": 64, "step": 1, "tooltip": "按 JSON 分镜排列顺序从第几条开始（含）。键名如「分镜4」是分镜名，不等于序号。"}),
+                "结束分镜": ("INT", {"default": 1, "min": 1, "max": 64, "step": 1, "tooltip": "跑到顺序第几条（含）。2:2 只跑第2条。"}),
                 "分镜时长": ("STRING", {"default": "", "multiline": False}),
             }
         }
@@ -379,6 +485,8 @@ class ShortDramaJSONShotSelector:
 
 
 class ShortDramaJSONAutoNextShot:
+    """兼容旧工作流：逻辑已并入 ShortDramaJSONConcatBatch，本节点不再续跑。"""
+
     @classmethod
     def INPUT_TYPES(cls):
         return {
@@ -387,70 +495,54 @@ class ShortDramaJSONAutoNextShot:
                 "shot_count": ("INT", {"default": 1, "min": 1, "max": 64}),
             },
             "optional": {"trigger": ("VIDEO",)},
-            "hidden": {"prompt": "PROMPT", "unique_id": "UNIQUE_ID"},
         }
 
     RETURN_TYPES = ()
     FUNCTION = "run"
     CATEGORY = CAT
     OUTPUT_NODE = True
+    DEPRECATED = True
 
-    def run(self, shot_index, shot_count, trigger=None, prompt=None, unique_id=None):
-        _ = (trigger, unique_id)
-        idx, remain = int(shot_index), int(shot_count)
-        if remain <= 1:
-            return {"ui": {"text": [f"本批完成（索引{idx}）"]}}
-        if not isinstance(prompt, dict) or not prompt:
-            return {"ui": {"text": ["无法获取 prompt，续跑失败"]}}
+    def run(self, shot_index, shot_count, trigger=None):
+        _ = (shot_index, shot_count, trigger)
+        return {"ui": {"text": ["已并入「续跑并拼接」，可删除本节点"]}}
 
-        start = idx
-        for node in prompt.values():
-            if isinstance(node, dict) and node.get("class_type") == "ShortDramaJSONConcatBatch":
-                prev = int(node.get("inputs", {}).get("merge_batch_start") or 0)
-                if prev > 0:
-                    start = prev
-                break
-        try:
-            msg = self._queue(prompt, idx + 1, remain - 1, start)
-        except Exception as exc:
-            msg = f"续跑失败: {exc}"
-        return {"ui": {"text": [msg]}}
 
-    @staticmethod
-    def _queue(prompt_dict: dict, next_index: int, remain: int, batch_start: int) -> str:
-        new_prompt = copy.deepcopy(prompt_dict)
-        found = False
-        for node in new_prompt.values():
-            if not isinstance(node, dict):
-                continue
-            inputs = node.setdefault("inputs", {})
-            if node.get("class_type") == "ShortDramaJSONShotSelector":
-                inputs["开始分镜"] = next_index
-                inputs["结束分镜"] = next_index + remain - 1
-                for old in ("分镜索引", "分镜结束", "分镜数量"):
-                    inputs.pop(old, None)
-                found = True
-            elif node.get("class_type") == "ShortDramaJSONConcatBatch":
-                inputs["merge_batch_start"] = batch_start
-        if not found:
-            return "未找到分镜选择节点"
+def _queue_next_shot(prompt_dict: dict, next_index: int, remain: int, batch_start: int) -> str:
+    new_prompt = copy.deepcopy(prompt_dict)
+    found = False
+    for node in new_prompt.values():
+        if not isinstance(node, dict):
+            continue
+        inputs = node.setdefault("inputs", {})
+        ctype = node.get("class_type")
+        if ctype == "ShortDramaJSONShotSelector":
+            inputs["开始分镜"] = next_index
+            inputs["结束分镜"] = next_index + remain - 1
+            for old in ("分镜索引", "分镜结束", "分镜数量"):
+                inputs.pop(old, None)
+            found = True
+        elif ctype == "ShortDramaJSONConcatBatch":
+            inputs["merge_batch_start"] = batch_start
+    if not found:
+        return "未找到分镜选择节点"
 
-        payload = {
-            "prompt": new_prompt,
-            "client_id": getattr(PromptServer.instance, "client_id", None) or str(uuid.uuid4()),
-        }
-        if not payload["client_id"]:
-            payload.pop("client_id", None)
-        port = int(getattr(args, "port", 8188) or 8188)
-        req = urllib.request.Request(
-            f"http://127.0.0.1:{port}/prompt",
-            data=json.dumps(payload).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            body = resp.read().decode("utf-8", errors="ignore")
-        return f"已排队分镜{next_index}（剩余{remain}）｜{body[:100]}"
+    payload = {
+        "prompt": new_prompt,
+        "client_id": getattr(PromptServer.instance, "client_id", None) or str(uuid.uuid4()),
+    }
+    if not payload["client_id"]:
+        payload.pop("client_id", None)
+    port = int(getattr(args, "port", 8188) or 8188)
+    req = urllib.request.Request(
+        f"http://127.0.0.1:{port}/prompt",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        body = resp.read().decode("utf-8", errors="ignore")
+    return f"已排队分镜{next_index}（剩余{remain}）｜{body[:100]}"
 
 
 def _load_video_av(path: str) -> tuple[torch.Tensor, dict | None, float]:
@@ -509,7 +601,13 @@ def _concat_audio(parts: list[dict]) -> dict:
     return {"waveform": torch.cat(aligned, dim=-1), "sample_rate": sr}
 
 
+def _blocked3(msg: str | None = None):
+    return (ExecutionBlocker(msg), ExecutionBlocker(None), ExecutionBlocker(None))
+
+
 class ShortDramaJSONConcatBatch:
+    """未完成本批则自动 Queue 下一镜；最后一镜按分镜名拼接成片。"""
+
     @classmethod
     def INPUT_TYPES(cls):
         return {
@@ -522,27 +620,50 @@ class ShortDramaJSONConcatBatch:
                 "trigger": ("VIDEO",),
                 "merge_batch_start": ("INT", {"default": 0, "min": 0, "max": 64}),
             },
+            "hidden": {"prompt": "PROMPT"},
         }
 
     RETURN_TYPES = ("IMAGE", "AUDIO", "STRING")
     RETURN_NAMES = ("images", "audio", "info")
     FUNCTION = "run"
     CATEGORY = CAT
+    OUTPUT_NODE = True
 
-    def run(self, shot_index, shot_count, prefix_root="ShortDrama_", trigger=None, merge_batch_start=0):
+    def run(self, shot_index, shot_count, prefix_root="ShortDrama_", trigger=None, merge_batch_start=0, prompt=None):
         _ = trigger
-        remain, end, start = int(shot_count), int(shot_index), int(merge_batch_start or 0)
-        if start <= 0 or remain > 1:
-            return (ExecutionBlocker(None), ExecutionBlocker(None), ExecutionBlocker(None))
+        idx, remain = int(shot_index), int(shot_count)
+        batch_start = int(merge_batch_start or 0)
 
+        # 本批未结束：续跑下一镜，下游成片先挡住
+        if remain > 1:
+            if not isinstance(prompt, dict) or not prompt:
+                return {"ui": {"text": ["无法获取 prompt，续跑失败"]}, "result": _blocked3()}
+            start = batch_start if batch_start > 0 else idx
+            try:
+                msg = _queue_next_shot(prompt, idx + 1, remain - 1, start)
+            except Exception as exc:
+                msg = f"续跑失败: {exc}"
+            return {"ui": {"text": [msg]}, "result": _blocked3()}
+
+        # 单镜批次：不拼
+        if batch_start <= 0:
+            return {"ui": {"text": [f"本批完成（单镜{idx}，无需拼接）"]}, "result": _blocked3()}
+
+        # 最后一镜：按分镜名拼接
         out_dir = folder_paths.get_output_directory()
         root = str(prefix_root or "ShortDrama_")
+        end = idx
+        start = batch_start
         try:
+            prompt_json = _prompt_json_from_workflow(prompt)
+            if not prompt_json.strip():
+                raise ValueError("无法从「分镜选择/循环」读取 prompt_json，请确认同图已接 JSON")
+            names = _shot_names_for_batch(prompt_json, start, end)
             paths = []
-            for i in range(start, end + 1):
-                path = _latest_mp4(out_dir, f"{root}分镜{i}")
+            for name in names:
+                path = _latest_mp4(out_dir, f"{root}{name}")
                 if not path:
-                    raise FileNotFoundError(f"缺少分镜视频: {root}分镜{i}*.mp4")
+                    raise FileNotFoundError(f"缺少分镜视频: {root}{name}*.mp4")
                 paths.append(path)
 
             packs = [_load_video_av(p) for p in paths]
@@ -559,10 +680,11 @@ class ShortDramaJSONConcatBatch:
                 else:
                     samples = max(1, int(imgs.shape[0] / max(fps, 1e-3) * 44100))
                     aud_parts.append({"waveform": torch.zeros((1, 1, samples), dtype=torch.float32), "sample_rate": 44100})
-            info = f"已拼接分镜{start}-{end} 共{len(paths)}段｜" + " + ".join(os.path.basename(p) for p in paths)
-            return torch.cat(resized, dim=0), _concat_audio(aud_parts), info
+            label = " + ".join(names)
+            info = f"已拼接 {label} 共{len(paths)}段｜" + " + ".join(os.path.basename(p) for p in paths)
+            return {"ui": {"text": [info]}, "result": (torch.cat(resized, dim=0), _concat_audio(aud_parts), info)}
         except Exception as exc:
-            return (ExecutionBlocker(f"拼接失败: {exc}"), ExecutionBlocker(None), ExecutionBlocker(str(exc)))
+            return {"ui": {"text": [f"拼接失败: {exc}"]}, "result": _blocked3(f"拼接失败: {exc}")}
 
 
 NODE_CLASS_MAPPINGS = {
@@ -571,10 +693,9 @@ NODE_CLASS_MAPPINGS = {
     "ShortDramaJSONAutoNextShot": ShortDramaJSONAutoNextShot,
     "ShortDramaJSONConcatBatch": ShortDramaJSONConcatBatch,
 }
-
 NODE_DISPLAY_NAME_MAPPINGS = {
     "ShortDramaJSONSlotParser": "短剧JSON · 角色场景图绑定",
     "ShortDramaJSONShotSelector": "短剧JSON · 分镜选择/循环",
-    "ShortDramaJSONAutoNextShot": "短剧JSON · 续跑下一镜",
-    "ShortDramaJSONConcatBatch": "短剧JSON · 本批全部分镜拼接",
+    "ShortDramaJSONAutoNextShot": "短剧JSON · 续跑下一镜（已并入，可删）",
+    "ShortDramaJSONConcatBatch": "短剧JSON · 续跑并拼接",
 }

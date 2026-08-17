@@ -1510,6 +1510,206 @@
       "bgcolor": "#355"
     },
     {
+      "id": 115,
+      "type": "ResolutionSelector",
+      "pos": [
+        769.6122625604617,
+        317.61055739010595
+      ],
+      "size": [
+        270,
+        170
+      ],
+      "flags": {},
+      "order": 11,
+      "mode": 0,
+      "showAdvanced": false,
+      "inputs": [
+        {
+          "label": "aspect_ratio",
+          "name": "aspect_ratio",
+          "type": "COMBO",
+          "widget": {
+            "name": "aspect_ratio"
+          }
+        },
+        {
+          "label": "megapixels",
+          "name": "megapixels",
+          "type": "FLOAT",
+          "widget": {
+            "name": "megapixels"
+          }
+        },
+        {
+          "label": "multiple",
+          "name": "multiple",
+          "type": "INT",
+          "widget": {
+            "name": "multiple"
+          }
+        }
+      ],
+      "outputs": [
+        {
+          "label": "width",
+          "name": "width",
+          "type": "INT",
+          "links": [
+            276
+          ]
+        },
+        {
+          "label": "height",
+          "name": "height",
+          "type": "INT",
+          "links": [
+            277
+          ]
+        }
+      ],
+      "title": "Resolution Selector (Size)",
+      "properties": {
+        "Node name for S&R": "ResolutionSelector",
+        "cnr_id": "comfy-core",
+        "ver": "0.30.0",
+        "ue_properties": {
+          "widget_ue_connectable": {},
+          "input_ue_unconnectable": {},
+          "version": "7.5.2"
+        },
+        "widget_ue_connectable": {}
+      },
+      "widgets_values": [
+        "4:3 (Standard)",
+        0.1,
+        32
+      ],
+      "color": "#432",
+      "bgcolor": "#653"
+    },
+    {
+      "id": 221,
+      "type": "SaveVideo",
+      "pos": [
+        2571.67273410287,
+        225.58637636524816
+      ],
+      "size": [
+        360,
+        379.7391304347826
+      ],
+      "flags": {},
+      "order": 27,
+      "mode": 0,
+      "inputs": [
+        {
+          "label": "video",
+          "name": "video",
+          "type": "VIDEO",
+          "link": 432
+        },
+        {
+          "label": "filename_prefix",
+          "name": "filename_prefix",
+          "type": "STRING",
+          "widget": {
+            "name": "filename_prefix"
+          },
+          "link": null
+        },
+        {
+          "label": "format",
+          "name": "format",
+          "type": "COMBO",
+          "widget": {
+            "name": "format"
+          },
+          "link": null
+        },
+        {
+          "label": "codec",
+          "name": "codec",
+          "type": "COMFY_DYNAMICCOMBO_V3",
+          "widget": {
+            "name": "codec"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "label": "video",
+          "name": "video",
+          "type": "VIDEO",
+          "links": null
+        }
+      ],
+      "title": "SaveVideo — 保存",
+      "properties": {
+        "Node name for S&R": "SaveVideo",
+        "cnr_id": "comfy-core",
+        "ver": "0.29.0"
+      },
+      "widgets_values": [
+        "ShortDrama",
+        "auto",
+        "auto"
+      ]
+    },
+    {
+      "id": 129,
+      "type": "RandomNoise",
+      "pos": [
+        1624.6436086391345,
+        45.82935649975308
+      ],
+      "size": [
+        360,
+        90
+      ],
+      "flags": {},
+      "order": 12,
+      "mode": 0,
+      "inputs": [
+        {
+          "label": "noise_seed",
+          "name": "noise_seed",
+          "type": "INT",
+          "widget": {
+            "name": "noise_seed"
+          }
+        }
+      ],
+      "outputs": [
+        {
+          "label": "NOISE",
+          "name": "NOISE",
+          "type": "NOISE",
+          "links": [
+            253
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "RandomNoise",
+        "cnr_id": "comfy-core",
+        "ver": "0.30.0",
+        "ue_properties": {
+          "widget_ue_connectable": {},
+          "input_ue_unconnectable": {},
+          "version": "7.5.2"
+        },
+        "widget_ue_connectable": {}
+      },
+      "widgets_values": [
+        621466078834143,
+        "randomize"
+      ],
+      "color": "#322",
+      "bgcolor": "#533"
+    },
+    {
       "id": 199,
       "type": "ShortDramaJSONSlotParser",
       "pos": [
@@ -1633,85 +1833,6 @@
       "bgcolor": "#355"
     },
     {
-      "id": 115,
-      "type": "ResolutionSelector",
-      "pos": [
-        769.6122625604617,
-        317.61055739010595
-      ],
-      "size": [
-        270,
-        170
-      ],
-      "flags": {},
-      "order": 11,
-      "mode": 0,
-      "showAdvanced": false,
-      "inputs": [
-        {
-          "label": "aspect_ratio",
-          "name": "aspect_ratio",
-          "type": "COMBO",
-          "widget": {
-            "name": "aspect_ratio"
-          }
-        },
-        {
-          "label": "megapixels",
-          "name": "megapixels",
-          "type": "FLOAT",
-          "widget": {
-            "name": "megapixels"
-          }
-        },
-        {
-          "label": "multiple",
-          "name": "multiple",
-          "type": "INT",
-          "widget": {
-            "name": "multiple"
-          }
-        }
-      ],
-      "outputs": [
-        {
-          "label": "width",
-          "name": "width",
-          "type": "INT",
-          "links": [
-            276
-          ]
-        },
-        {
-          "label": "height",
-          "name": "height",
-          "type": "INT",
-          "links": [
-            277
-          ]
-        }
-      ],
-      "title": "Resolution Selector (Size)",
-      "properties": {
-        "Node name for S&R": "ResolutionSelector",
-        "cnr_id": "comfy-core",
-        "ver": "0.30.0",
-        "ue_properties": {
-          "widget_ue_connectable": {},
-          "input_ue_unconnectable": {},
-          "version": "7.5.2"
-        },
-        "widget_ue_connectable": {}
-      },
-      "widgets_values": [
-        "4:3 (Standard)",
-        0.1,
-        32
-      ],
-      "color": "#432",
-      "bgcolor": "#653"
-    },
-    {
       "id": 201,
       "type": "PrimitiveStringMultiline",
       "pos": [
@@ -1723,7 +1844,7 @@
         763.9938373485733
       ],
       "flags": {},
-      "order": 12,
+      "order": 13,
       "mode": 0,
       "inputs": [
         {
@@ -1758,131 +1879,10 @@
         "widget_ue_connectable": {}
       },
       "widgets_values": [
-        "{\n  \"整体风格\": \"3D CG，电影感，写实数字人类，古代东方市井武侠质感；青绿花纹绸、近黑色劲装与粗布材质区分清晰；克制影院光；无现代物件、建筑、服饰、灯具、文字或交通工具\",\n  \"角色图片\": {\n    \"杀手\": \"中年男子，黑发高束、垂黑发绳，面容冷峻；深蓝近黑交领短袍，灰黑短披风，黑腰带配暗红穗，小臂黑布缠裹，腰侧单柄黑鞘短刀、暗红缠柄\",\n    \"地主\": \"中年男子，沧桑老实脸，短黑发向上梳理，淡胡茬；米褐色粗布交领短袖衫、布扣，深灰粗布短裤，薄黑布鞋\",\n    \"店小二\": \"约十岁女孩，双丫髻，眼神机灵带笑；青绿粗布交领短褂短裤，脏白破边围裙，草鞋；表面顺从神情\"\n  },\n  \"场景图片\": {\n   \n    \"杀手住所\": \"高夯土墙后隐蔽小院；青灰小砖房、深色屋檐、半掩木门贴白纸条、糊纸花格窗；檐下木板床与薄棕被；粗桌放褐陶壶与小凳；石缝青苔；左角小树；斜硬日光照、高反差、冷清隐秘\",\n    \"酒楼内部\": \"仅酒楼内景——勿露外夜街与外匾。参考静帧虽为日间，夜间镜头必须从首帧起覆盖为夜：窗外墨蓝无日光、无光柱、无浮尘暖阳；室内仅油灯与柜台暖光主导。日间镜头才可用左侧木格窗强暖光柱与浮尘。右侧长柜台与多层架摆满碗罐；斑驳白墙贴「春酒春」；灰石地、剥红漆柱、方桌条凳、陶瓶陶碗\"\n  },\n  \"镜头规则\": \"优先过肩或面部特写硬切；对白时紧跟说话人脸；关键动作可带手与上半身；避免大场面群戏全景；每次换景必须点明对应场景标签；同一镜头单元内昼夜、服饰、身份、地点保持连续；角色与场景用尖括号引用，键名须与角色图片或场景图片完全一致；对白口型同步；每句台词不超过五秒；无对白镜头勿编造台词\",\n  \"分镜序列\": {\n    \"分镜1\": [\n      {\n        \"编号\": 1,\n        \"时长\": \"3s\",\n        \"衔接\": \"冷开场\",\n        \"镜头\": \"硬切至过肩中近景；机位静止；焦点在<地主>面部与抬起酒碗的手\",\n        \"构图\": \"中近景；<地主>前景右侧；桌对面<店小二>肩部虚焦\",\n        \"光影\": \"日间；左侧格窗强暖光柱；浮尘\",\n        \"画面\": \"日间<酒楼内部>。角落方桌。<地主>抬酒碗半遮下半脸，微微前倾，目光低向<店小二>，低声密谋，口型同步\",\n        \"禁止\": \"勿露外街；无现代道具\",\n        \"对白\": {\n          \"地主\": \"今夜把掌柜灌醉，亥时动手。\"\n        },\n        \"声音\": \"日间酒楼低嘈杂、轻碗沿触碰、窗外远处街声；耳语对白清晰且口型同步\"\n      },\n      {\n        \"编号\": 2,\n        \"时长\": \"2s\",\n        \"衔接\": \"同场反打硬切\",\n        \"镜头\": \"硬切反打过肩；机位静止；焦点在<店小二>面部\",\n        \"构图\": \"<店小二>特写；身后柜台与酒坛虚焦\",\n        \"光影\": \"同日间内景光柱\",\n        \"画面\": \"仍为日间<酒楼内部>。<店小二>凑近，轻点头，顺从微笑、眼神机灵，口型同步作答\",\n        \"禁止\": \"勿有新角色入画\",\n        \"对白\": {\n          \"店小二\": \"好酒备足了，灌醉他就行。\"\n        },\n        \"声音\": \"日间酒楼环境声延续；孩童轻声带笑，口型同步\"\n      }\n    ],\n    \"分镜2\": [\n      {\n        \"编号\": 1,\n        \"时长\": \"3s\",\n        \"衔接\": \"硬切；换景至小院\",\n        \"镜头\": \"硬切至过肩特写；机位静止；焦点在<地主>面部\",\n        \"构图\": \"<地主>特写；木板床与陶壶背景虚焦\",\n        \"光影\": \"日间；院落斜硬日光；高反差\",\n        \"画面\": \"日间<杀手住所>檐下。<地主>面向画外<杀手>，微微前倾，压抑声线交待计划，口型同步\",\n        \"禁止\": \"本单元勿用夜光\",\n        \"对白\": {\n          \"地主\": \"小二灌醉他，你从侧门进，下手干净点。\"\n        },\n        \"声音\": \"院落蝉鸣、轻布料摩擦；低沉清晰对白，口型同步\"\n      },\n      {\n        \"编号\": 2,\n        \"时长\": \"2s\",\n        \"衔接\": \"同院反打硬切\",\n        \"镜头\": \"硬切反打特写；机位静止；焦点在<杀手>面部与按在刀鞘上的拇指\",\n        \"构图\": \"<杀手>特写；拇指按鞘可见\",\n        \"光影\": \"同日间硬光\",\n        \"画面\": \"仍为日间<杀手住所>。<杀手>微微颔首；拇指按住黑刀鞘；眼神冰冷无犹豫；短促口型同步应诺\",\n        \"禁止\": \"尚未拔刀\",\n        \"对白\": {\n          \"杀手\": \"收到。\"\n        },\n        \"声音\": \"日间院落环境声延续、轻刀鞘轻叩；低沉男声，口型同步\"\n      }\n    ]\n  }\n}\n"
+        "{\n  \"整体风格\": \"3D CG，电影感，写实数字人类，古代东方市井武侠质感；青绿花纹绸、近黑色劲装与粗布材质区分清晰；克制影院光；无现代物件、建筑、服饰、灯具、文字或交通工具\",\n  \"角色图片\": {\n    \"杀手\": \"中年男子，黑发高束、垂黑发绳，面容冷峻；深蓝近黑交领短袍，灰黑短披风，黑腰带配暗红穗，小臂黑布缠裹，腰侧单柄黑鞘短刀、暗红缠柄\",\n    \"地主\": \"中年男子，沧桑老实脸，短黑发向上梳理，淡胡茬；米褐色粗布交领短袖衫、布扣，深灰粗布短裤，薄黑布鞋\",\n    \"店小二\": \"约十岁女孩，双丫髻，眼神机灵带笑；青绿粗布交领短褂短裤，脏白破边围裙，草鞋；表面顺从神情\"\n  },\n  \"场景图片\": {\n   \n    \"杀手住所\": \"高夯土墙后隐蔽小院；青灰小砖房、深色屋檐、半掩木门贴白纸条、糊纸花格窗；檐下木板床与薄棕被；粗桌放褐陶壶与小凳；石缝青苔；左角小树；斜硬日光照、高反差、冷清隐秘\",\n    \"酒楼内部\": \"仅酒楼内景——勿露外夜街与外匾。参考静帧虽为日间，夜间镜头必须从首帧起覆盖为夜：窗外墨蓝无日光、无光柱、无浮尘暖阳；室内仅油灯与柜台暖光主导。日间镜头才可用左侧木格窗强暖光柱与浮尘。右侧长柜台与多层架摆满碗罐；斑驳白墙贴「春酒春」；灰石地、剥红漆柱、方桌条凳、陶瓶陶碗\"\n  },\n  \"镜头规则\": \"优先过肩或面部特写硬切；对白时紧跟说话人脸；关键动作可带手与上半身；避免大场面群戏全景；每次换景必须点明对应场景标签；同一镜头单元内昼夜、服饰、身份、地点保持连续；角色与场景用尖括号引用，键名须与角色图片或场景图片完全一致；对白口型同步；每句台词不超过五秒；无对白镜头勿编造台词\",\n  \"分镜序列\": {\n    \"分镜1\": [\n      {\n        \"编号\": 1,\n        \"时长\": \"3s\",\n        \"衔接\": \"冷开场\",\n        \"镜头\": \"硬切至过肩中近景；机位静止；焦点在<地主>面部与抬起酒碗的手\",\n        \"构图\": \"中近景；<地主>前景右侧；桌对面<店小二>肩部虚焦\",\n        \"光影\": \"日间；左侧格窗强暖光柱；浮尘\",\n        \"画面\": \"日间<酒楼内部>。角落方桌。<地主>抬酒碗半遮下半脸，微微前倾，目光低向<店小二>，低声密谋，口型同步\",\n        \"禁止\": \"勿露外街；无现代道具\",\n        \"对白\": {\n          \"地主\": \"今夜把掌柜灌醉，亥时动手。\"\n        },\n        \"声音\": \"日间酒楼低嘈杂、轻碗沿触碰、窗外远处街声；耳语对白清晰且口型同步\"\n      },\n      {\n        \"编号\": 2,\n        \"时长\": \"2s\",\n        \"衔接\": \"同场反打硬切\",\n        \"镜头\": \"硬切反打过肩；机位静止；焦点在<店小二>面部\",\n        \"构图\": \"<店小二>特写；身后柜台与酒坛虚焦\",\n        \"光影\": \"\",\n        \"画面\": \"仍为日间<酒楼内部>。<店小二>凑近，轻点头，顺从微笑、眼神机灵，口型同步作答\",\n        \"禁止\": \"勿有新角色入画\",\n        \"对白\": {\n          \"店小二\": \"好酒备足了，灌醉他就行。\"\n        },\n        \"声音\": \"日间酒楼环境声延续；孩童轻声带笑，口型同步\"\n      }\n    ],\n    \"分镜2\": [\n      {\n        \"编号\": 1,\n        \"时长\": \"3s\",\n        \"衔接\": \"硬切；换景至小院\",\n        \"镜头\": \"硬切至过肩特写；机位静止；焦点在<地主>面部\",\n        \"构图\": \"<地主>特写；木板床与陶壶背景虚焦\",\n        \"光影\": \"日间；院落斜硬日光；高反差\",\n        \"画面\": \"日间<杀手住所>檐下。<地主>面向画外<杀手>，微微前倾，压抑声线交待计划，口型同步\",\n        \"禁止\": \"本单元勿用夜光\",\n        \"对白\": {\n          \"地主\": \"小二灌醉他，你从侧门进，下手干净点。\"\n        },\n        \"声音\": \"院落蝉鸣、轻布料摩擦；低沉清晰对白，口型同步\"\n      },\n      {\n        \"编号\": 2,\n        \"时长\": \"2s\",\n        \"衔接\": \"同院反打硬切\",\n        \"镜头\": \"硬切反打特写；机位静止；焦点在<杀手>面部与按在刀鞘上的拇指\",\n        \"构图\": \"<杀手>特写；拇指按鞘可见\",\n        \"光影\": \"同日间硬光\",\n        \"画面\": \"仍为日间<杀手住所>。<杀手>微微颔首；拇指按住黑刀鞘；眼神冰冷无犹豫；短促口型同步应诺\",\n        \"禁止\": \"尚未拔刀\",\n        \"对白\": {\n          \"杀手\": \"收到。\"\n        },\n        \"声音\": \"日间院落环境声延续、轻刀鞘轻叩；低沉男声，口型同步\"\n      }\n    ]\n  }\n}\n"
       ],
       "color": "#232",
       "bgcolor": "#353"
-    },
-    {
-      "id": 221,
-      "type": "SaveVideo",
-      "pos": [
-        2571.67273410287,
-        225.58637636524816
-      ],
-      "size": [
-        360,
-        368
-      ],
-      "flags": {},
-      "order": 27,
-      "mode": 0,
-      "inputs": [
-        {
-          "label": "video",
-          "name": "video",
-          "type": "VIDEO",
-          "link": 432
-        },
-        {
-          "label": "filename_prefix",
-          "name": "filename_prefix",
-          "type": "STRING",
-          "widget": {
-            "name": "filename_prefix"
-          },
-          "link": null
-        },
-        {
-          "label": "format",
-          "name": "format",
-          "type": "COMBO",
-          "widget": {
-            "name": "format"
-          },
-          "link": null
-        },
-        {
-          "label": "codec",
-          "name": "codec",
-          "type": "COMFY_DYNAMICCOMBO_V3",
-          "widget": {
-            "name": "codec"
-          },
-          "link": null
-        }
-      ],
-      "outputs": [
-        {
-          "label": "video",
-          "name": "video",
-          "type": "VIDEO",
-          "links": null
-        }
-      ],
-      "title": "SaveVideo — 保存",
-      "properties": {
-        "Node name for S&R": "SaveVideo",
-        "cnr_id": "comfy-core",
-        "ver": "0.29.0"
-      },
-      "widgets_values": [
-        "ShortDrama",
-        "auto",
-        "auto"
-      ]
-    },
-    {
-      "id": 129,
-      "type": "RandomNoise",
-      "pos": [
-        1624.6436086391345,
-        45.82935649975308
-      ],
-      "size": [
-        360,
-        90
-      ],
-      "flags": {},
-      "order": 13,
-      "mode": 0,
-      "inputs": [
-        {
-          "label": "noise_seed",
-          "name": "noise_seed",
-          "type": "INT",
-          "widget": {
-            "name": "noise_seed"
-          }
-        }
-      ],
-      "outputs": [
-        {
-          "label": "NOISE",
-          "name": "NOISE",
-          "type": "NOISE",
-          "links": [
-            253
-          ]
-        }
-      ],
-      "properties": {
-        "Node name for S&R": "RandomNoise",
-        "cnr_id": "comfy-core",
-        "ver": "0.30.0",
-        "ue_properties": {
-          "widget_ue_connectable": {},
-          "input_ue_unconnectable": {},
-          "version": "7.5.2"
-        },
-        "widget_ue_connectable": {}
-      },
-      "widgets_values": [
-        1005,
-        "randomize"
-      ],
-      "color": "#322",
-      "bgcolor": "#533"
     }
   ],
   "links": [
@@ -2344,10 +2344,10 @@
     "frontendVersion": "1.47.11",
     "VHS_latentpreview": false,
     "ds": {
-      "scale": 1.2968712300500604,
+      "scale": 0.375657400450807,
       "offset": [
-        1350.52218678546,
-        -79.55617197654475
+        2600.4955153022556,
+        1704.1601077211337
       ]
     },
     "KKvideo_latentpreview": false,
