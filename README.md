@@ -148,14 +148,12 @@
 
 **单个分镜生成**
 
-<img src="file/1.png" alt="单个分镜生成" width="100%" />
+![单个分镜生成](file/1.png)
 
 **多场景循环生成**
 
-<img src="file/2.png" alt="多场景循环生成" width="100%" />
+![多场景循环生成](file/2.png)
 
 **生成结果**
 
-<video src="file/生成结果.mp4" controls width="100%"></video>
-
-若预览无法播放，直接打开：[生成结果.mp4](file/生成结果.mp4)
+[生成结果.mp4](file/生成结果.mp4)
