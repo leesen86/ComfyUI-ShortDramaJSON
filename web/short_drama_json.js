@@ -83,7 +83,10 @@ function syncBinderSockets(node, count) {
     }
   }
   for (const out of node.outputs || []) {
-    if ((/^Picture_\d+$/.test(out.name) || out.name === "总时长" || out.name === "prompt_json") && out.links?.length) {
+    if (
+      (/^Picture_\d+$/.test(out.name) || out.name === "总时长" || out.name === "prompt_json" || out.name === "shot_prompt") &&
+      out.links?.length
+    ) {
       keepOut.set(out.name, [...out.links]);
     }
   }
@@ -104,9 +107,10 @@ function syncBinderSockets(node, count) {
   if (!node.inputs?.some((x) => x.name === "prompt_json")) node.addInput("prompt_json", "STRING");
   if (!node.inputs?.some((x) => x.name === "shot_prompt")) node.addInput("shot_prompt", "STRING");
   if (!node.outputs?.some((x) => x.name === "prompt_json")) node.addOutput("prompt_json", "STRING");
+  if (!node.outputs?.some((x) => x.name === "shot_prompt")) node.addOutput("shot_prompt", "STRING");
   for (let i = 1; i <= n; i++) {
     const name = `Picture_${i}`;
-    if (!node.inputs?.some((x) => x.name === name)) node.addInput(name, "IMAGE");
+    if (!node.inputs?.some((x) => x.name === name)) node.addInput(name, "IMAGE", { shape: 7 });
     if (!node.outputs?.some((x) => x.name === name)) node.addOutput(name, "IMAGE");
   }
   if (!node.outputs?.some((x) => x.name === "总时长")) node.addOutput("总时长", "FLOAT");
@@ -139,9 +143,11 @@ function syncBinderSockets(node, count) {
     .map((name) => byNameIn[name])
     .filter(Boolean)
     .concat(keepExtraIn);
+  // Picture 紧跟 prompt_json，shot_prompt 放末尾前，避免旧工作流 MiniMax 参考图槽位错位
   node.outputs = [
     "prompt_json",
     ...Array.from({ length: n }, (_, i) => `Picture_${i + 1}`),
+    "shot_prompt",
     "总时长",
   ]
     .map((name) => byNameOut[name])
@@ -150,6 +156,7 @@ function syncBinderSockets(node, count) {
   for (let i = 0; i < node.inputs.length; i++) {
     const inp = node.inputs[i];
     if (inp) inp.hidden = false;
+    if (/^Picture_\d+$/.test(inp.name || "")) inp.shape = 7;
     if (keepIn.has(inp.name)) {
       inp.link = keepIn.get(inp.name);
       retargetIn(inp.link, i);
@@ -161,6 +168,9 @@ function syncBinderSockets(node, count) {
     if (out.name === "prompt_json") {
       out.label = "prompt_json";
       out.localized_name = "prompt_json";
+    } else if (out.name === "shot_prompt") {
+      out.label = "shot_prompt";
+      out.localized_name = "shot_prompt";
     } else if (out.name === "总时长") {
       out.label = "总时长";
       out.localized_name = "总时长";
@@ -274,8 +284,8 @@ function refreshBinderLabels(node) {
       : !parsed
         ? "上游 JSON 无效"
         : slots.length
-          ? `共${slots.length}槽（随 JSON）｜` + slots.map((s) => `${s.kind}·${s.name}`).join(" | ")
-          : "角色图片/场景图片为空";
+          ? `共${slots.length}槽（角色可不接图）｜` + slots.map((s) => `${s.kind}·${s.name}`).join(" | ")
+          : "角色图片/场景图片为空（可不绑图）";
   }
   const durOut = node.outputs?.find((o) => o.name === "总时长");
   if (durOut) {
@@ -285,7 +295,7 @@ function refreshBinderLabels(node) {
   }
   const byPic = new Map(slots.map((s) => [s.picture, s]));
   for (const sock of [...(node.inputs || []), ...(node.outputs || [])]) {
-    if (sock.name === "总时长" || sock.name === "prompt_json") continue;
+    if (sock.name === "总时长" || sock.name === "prompt_json" || sock.name === "shot_prompt") continue;
     const m = String(sock.name || "").match(/^Picture_(\d+)$/);
     if (!m) continue;
     const meta = byPic.get(Number(m[1]));

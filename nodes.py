@@ -131,6 +131,55 @@ def _empty_image():
     return torch.zeros((1, 64, 64, 3), dtype=torch.float32)
 
 
+def _is_real_image(img) -> bool:
+    """未接线 / 空值不算参考图，允许不绑定角色。"""
+    if img is None:
+        return False
+    t = img[0] if isinstance(img, (list, tuple)) and img else img
+    return isinstance(t, torch.Tensor) and t.ndim >= 3 and t.numel() > 0
+
+
+def apply_bound_pictures(text: str, bound_name_to_pic: dict[str, int]) -> str:
+    """只给已接线的角色/场景加 <Picture N>；未绑的名称保留尖括号，不占参考图序号。"""
+    if not text:
+        return ""
+    text = re.sub(r"/<\s*Picture\s+\d+\s*>", "", text, flags=re.I)
+    text = _PIC_REF.sub("", text)
+
+    def repl(m: re.Match) -> str:
+        name = m.group(1).strip()
+        low = name.lower().replace(" ", "")
+        if low.startswith("picture") or low.startswith("image"):
+            return m.group(0)
+        pic = bound_name_to_pic.get(name)
+        return f"<{name}>/<Picture {pic}>" if pic else m.group(0)
+
+    return _TAG.sub(repl, text)
+
+
+def bind_slot_images(slots: list[dict[str, Any]], kwargs: dict, gate: set[int] | None) -> tuple[dict[str, int], list]:
+    """按槽位收集已接参考图；gate 为本镜放行的旧 Picture 号。返回 名称→紧凑序号 与按槽输出（未接为 None）。"""
+    bound: dict[str, int] = {}
+    pics: list = []
+    compact = 0
+    n = len(slots) or _slot_count_from_names(kwargs)
+    if slots:
+        for slot in slots:
+            i = int(slot["picture"])
+            img = kwargs.get(f"Picture_{i}")
+            if not _is_real_image(img) or (gate is not None and i not in gate):
+                img = None
+            if img is not None:
+                compact += 1
+                bound[str(slot["name"])] = compact
+            pics.append(img)
+        return bound, pics
+    for i in range(1, n + 1):
+        img = kwargs.get(f"Picture_{i}")
+        pics.append(img if _is_real_image(img) else None)
+    return bound, pics
+
+
 def list_shots(data: dict[str, Any]) -> list[tuple[str, list]]:
     seq = data.get("分镜序列")
     shots = []
@@ -192,7 +241,8 @@ def override_shot_duration(csv: str, index: int, fallback: float) -> float:
     return v if v > 0 else float(fallback)
 
 
-_CLIP_TEXT_KEYS = ("场景", "镜头", "画面", "声音", "构图", "光影", "衔接", "禁止", "对白")
+_CLIP_TEXT_KEYS = ("场景", "镜头", "画面", "声音", "构图", "光影", "衔接", "禁止", "对白", "H3", "h3")
+_H3_KEYS = ("H3", "h3")
 
 
 def _clip_blob(clips: list) -> str:
@@ -246,11 +296,25 @@ def _expand_clips_refs(clips: list, pics: dict[str, int]) -> list:
             out.append(c)
             continue
         nc = dict(c)
-        for key in ("场景", "镜头", "画面", "声音", "构图", "光影", "衔接", "禁止"):
+        for key in ("场景", "镜头", "画面", "声音", "构图", "光影", "衔接", "禁止", "H3", "h3"):
             if isinstance(nc.get(key), str):
                 nc[key] = _expand_ref_tags(nc[key], pics)
         out.append(nc)
     return out
+
+
+def _h3_from_clips(clips: list) -> str:
+    """分镜若写了 H3 字段，直接把英文 H3 提示词送给 MiniMax，不再 dumping 中文 JSON。"""
+    parts: list[str] = []
+    for c in clips:
+        if not isinstance(c, dict):
+            continue
+        for key in _H3_KEYS:
+            val = c.get(key)
+            if isinstance(val, str) and val.strip():
+                parts.append(val.strip())
+                break
+    return "\n\n".join(parts)
 
 
 def filter_shot_context(data: dict[str, Any], clips: list) -> dict[str, Any]:
@@ -293,6 +357,9 @@ def build_shot_prompt(data: dict[str, Any], index: int) -> tuple[str, str, int, 
     out = filter_shot_context(data, clips)
     pics = {s["name"]: s["picture"] for s in discover_slots(data)}
     clips = _expand_clips_refs(clips, pics)
+    h3 = _h3_from_clips(clips)
+    if h3:
+        return h3, name, n, shot_duration(clips), f"ShortDrama_{name}"
     out.update({"当前分镜": name, "分镜序号": idx, "分镜总数": n, "分镜序列": clips})
     return json.dumps(out, ensure_ascii=False, indent=2), name, n, shot_duration(clips), f"ShortDrama_{name}"
 
@@ -417,14 +484,14 @@ class ShortDramaJSONSlotParser:
                         "forceInput": True,
                         "multiline": True,
                         "default": "",
-                        "tooltip": "接「分镜选择/循环」的 shot_prompt；只放行本镜引用的 <Picture N>，其余参考图不送入下游。",
+                        "tooltip": "接「分镜选择/循环」的 shot_prompt；只放行本镜引用的参考图。角色槽可不接图。",
                     },
                 ),
             },
         }
 
     RETURN_TYPES = _FLEX_RETURNS
-    RETURN_NAMES = ("prompt_json", "总时长")
+    RETURN_NAMES = ("prompt_json", "shot_prompt", "总时长")
     FUNCTION = "run"
     CATEGORY = CAT
 
@@ -441,21 +508,24 @@ class ShortDramaJSONSlotParser:
         return True
 
     def run(self, prompt_json, 总时长=10.0, shot_prompt=None, **kwargs):
+        if not isinstance(prompt_json, str):
+            prompt_json = "" if prompt_json is None else str(prompt_json)
+        if not isinstance(shot_prompt, str):
+            shot_prompt = None
         data = _parse_json(prompt_json)
-        n = len(discover_slots(data)) or _slot_count_from_names(kwargs)
+        slots = discover_slots(data)
+        n = len(slots) or _slot_count_from_names(kwargs)
         _apply_binder_schema(n)
         gate = resolve_picture_gate(shot_prompt, data)
-        pics = []
-        for i in range(1, n + 1):
-            img = kwargs.get(f"Picture_{i}")
-            if img is None:
-                img = _empty_image()
-            # 接了有效 shot_prompt 时：未引用槽位送空图，避免角色参考图泄漏进 MiniMax
-            if gate is not None and i not in gate:
-                img = _empty_image()
-            pics.append(img)
+        bound, pics = bind_slot_images(slots, kwargs, gate)
+        if n > len(pics):
+            pics.extend([None] * (n - len(pics)))
+        rewritten = apply_bound_pictures(shot_prompt or "", bound)
+        if not rewritten.strip():
+            rewritten = prompt_json or ""
         dur = 总时长 if 总时长 is not None else kwargs.get("时长微调", 10.0)
-        return (prompt_json or "",) + tuple(pics) + (float(dur),)
+        # 顺序：prompt_json, Picture_1..N, shot_prompt, 总时长 —— Picture 槽位从 1 起，避免挤乱 MiniMax 参考图连线
+        return (prompt_json or "",) + tuple(pics[:n]) + (rewritten, float(dur))
 
 
 class ShortDramaJSONShotSelector:

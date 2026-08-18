@@ -1411,7 +1411,6 @@
           "name": "IMAGE",
           "type": "IMAGE",
           "links": [
-            477,
             487
           ]
         },
@@ -1479,10 +1478,7 @@
           "label": "IMAGE",
           "name": "IMAGE",
           "type": "IMAGE",
-          "links": [
-            478,
-            488
-          ]
+          "links": []
         },
         {
           "label": "MASK",
@@ -1734,31 +1730,36 @@
           "label": "角色·杀手",
           "name": "Picture_1",
           "type": "IMAGE",
-          "link": 484
+          "link": 484,
+          "shape": 7
         },
         {
           "label": "角色·地主",
           "name": "Picture_2",
           "type": "IMAGE",
-          "link": 485
+          "link": 485,
+          "shape": 7
         },
         {
           "label": "角色·店小二",
           "name": "Picture_3",
           "type": "IMAGE",
-          "link": 486
+          "link": 486,
+          "shape": 7
         },
         {
           "label": "场景·杀手住所",
           "name": "Picture_4",
           "type": "IMAGE",
-          "link": null
+          "link": null,
+          "shape": 7
         },
         {
           "label": "场景·酒楼内部",
           "name": "Picture_5",
           "type": "IMAGE",
-          "link": 487
+          "link": 487,
+          "shape": 7
         },
         {
           "name": "shot_prompt",
@@ -1772,47 +1773,61 @@
           "label": "prompt_json",
           "name": "prompt_json",
           "type": "STRING",
-          "links": [
-            473
-          ]
+          "links": []
         },
         {
           "label": "角色·杀手",
           "name": "Picture_1",
           "type": "IMAGE",
-          "links": null
+          "links": [
+            468
+          ]
         },
         {
           "label": "角色·地主",
           "name": "Picture_2",
           "type": "IMAGE",
-          "links": null
+          "links": [
+            469
+          ]
         },
         {
           "label": "角色·店小二",
           "name": "Picture_3",
           "type": "IMAGE",
-          "links": null
+          "links": [
+            470
+          ]
         },
         {
           "label": "场景·杀手住所",
           "name": "Picture_4",
           "type": "IMAGE",
-          "links": null
+          "links": [
+            471
+          ]
         },
         {
           "label": "场景·酒楼内部",
           "name": "Picture_5",
           "type": "IMAGE",
-          "links": null
+          "links": [
+            472
+          ]
+        },
+        {
+          "label": "shot_prompt",
+          "name": "shot_prompt",
+          "type": "STRING",
+          "links": [
+            473
+          ]
         },
         {
           "label": "总时长",
           "name": "总时长",
-          "type": "*",
-          "links": [
-            480
-          ]
+          "type": "FLOAT",
+          "links": []
         }
       ],
       "properties": {
@@ -2113,7 +2128,7 @@
     [
       473,
       199,
-      0,
+      6,
       136,
       12,
       "STRING"
@@ -2140,22 +2155,6 @@
       0,
       199,
       5,
-      "IMAGE"
-    ],
-    [
-      477,
-      213,
-      0,
-      199,
-      6,
-      "IMAGE"
-    ],
-    [
-      478,
-      212,
-      0,
-      199,
-      7,
       "IMAGE"
     ],
     [
@@ -2220,14 +2219,6 @@
       0,
       199,
       5,
-      "IMAGE"
-    ],
-    [
-      488,
-      212,
-      0,
-      199,
-      6,
       "IMAGE"
     ]
   ],
