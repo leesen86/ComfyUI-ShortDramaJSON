@@ -12,21 +12,21 @@
 2. 「分镜选择/循环」设开始/结束镜；把其 `shot_prompt` 接到绑定节点入口
 3. **MiniMax 的 prompt 接绑定节点输出的 `shot_prompt`**（已按本镜、已接的参考图重编号）。不要接完整 `prompt_json`
 4. 时长接「分镜选择/循环」的 `duration`（例如分镜3为 3s）；单镜设 `3:3`，多镜把 SaveVideo 接到「续跑并拼接」：未完自动 Queue，最后一镜自动拼成片
-5. **（可选）末帧续接**：在「分镜选择/循环」打开 **末帧续接**，设 **续接秒数** / `prefix_root`。该节点直接输出：
-   - `上一镜末帧` → 绑定 → MiniMax 多一个 `ref_image`
-   - `上一镜视频` → MiniMax `ref_video_0`
-   - `上一镜音频` → MiniMax `ref_video_audio_0` / `ref_audio_0`
-   第 2 镜起自动读上一镜成片；第 1 镜不传（`None`）。
+5. **（可选）续接帧数**：在「分镜选择/循环」填 CSV（与分镜时长同格式），如 `0,5,0,5,5,5`——某镜为 `0` 表示该镜不续接；非 0 取上一镜末 N 帧。**成片查找前缀** 填 `ShortDrama_`。节点会输出上一镜末帧/视频/音频；**是否接到 MiniMax 或 Motion Context 由你自己拉线**。
+6. **（可选）Latent 续接**：自行接线 `保存本镜 Latent` / `加载上一镜 Latent` + `H3 Motion Context`。`context_length` 仍是原版下拉时，中间接「续接帧数→Motion Context」适配节点；并把 **续接帧数** 也接到「加载上一镜 Latent」（`0` 时通传）。
 
-示例工作流见 `example/`。
+示例工作流见 `example/`；门口告别版见仓库 `demo/门口告别 MIXMAX-H3(新).json`。
 
 ## 节点
 
 
 | 节点       | 作用                                                    |
 | -------- | ----------------------------------------------------- |
-| 角色场景图绑定  | 按 JSON 建槽（角色/场景均可空）；`prompt_json` 直通，中间左右对齐参考图，再输出本镜 `shot_prompt`，末行 **总时长**；可接「上一镜末帧」并入末位 Picture |
-| 分镜选择/循环  | 选当前镜；输出提示词/时长；**末帧续接**时附带上一镜末帧 + video + audio（第 1 镜不传） |
+| 角色场景图绑定  | 按 JSON 建槽；可接「上一镜末帧」并入末位 Picture |
+| 分镜选择/循环  | 选当前镜；输出本镜续接帧数 + 上一镜末帧/视频/音频（自行决定接哪几根线） |
+| 保存本镜 Latent | 按 `shot_index` 存 H3 AV latent（供 Motion Context） |
+| 加载上一镜 Latent | 读上一镜 latent；第 1 镜、续接帧数=0 或缺失返回 `None`（通传） |
+| 续接帧数→Motion Context | INT→原版 `context_length` COMBO（不改 H3-Motion-Context） |
 | 上一镜成片   | 已并入分镜选择，可删（旧图仍可用） |
 | 续跑并拼接   | 未完自动 Queue 下一镜；最后一镜按分镜名拼成片                         |
 
@@ -151,22 +151,35 @@
 - 「续跑并拼接」自动从同图「分镜选择/循环」读取 JSON；多镜只需接这一个节点
 - 点「刷新分镜信息」会把结束镜同步成 JSON 总镜数
 
-## 末帧续接
+## 续接帧数
 
-循环生成时把上一镜成片传给下一镜作参考（末帧图 + 视频 + 音频），已并入 **分镜选择/循环**：
+循环时「分镜选择/循环」可输出上一镜末帧/视频/音频；**接哪些口由你自己拉线**。
 
-1. 打开 **末帧续接**；设 **续接秒数**（默认 5；0=整段）；`prefix_root` 与 SaveVideo 前缀一致
-2. 接线（绑定节点左右同序：`上一镜末帧` / `shot_prompt` 输入输出对齐）：
-   - 分镜选择 `上一镜末帧` → 绑定左侧 **上一镜末帧**
-   - 绑定右侧 **上一镜末帧** → MiniMax `ref_image_*`（末位续接 Picture 已隐藏，旧线会自动迁到此口）
-   - `上一镜视频` → MiniMax **`ref_video_0`**
-   - `上一镜音频` → MiniMax **`ref_video_audio_0`** / **`ref_audio_0`**
-3. 绑定打开 **末帧作首帧**（默认开）时，提示词会写成 I2VA 首帧对齐，并注明 video/audio 连续性
-4. 先跑通第 1 镜并 SaveVideo；从第 2 镜起自动读 `ShortDrama_<分镜名>*.mp4` 的**最后 N 秒**
-5. 参考视频会自动压到最多 **22 帧**（合法帧数）并缩小短边，避免第 2 镜起 VAE 编码卡死；衔接关键帧取自末尾
-6. **无对白镜**（提示词无 `<d>…</d>`）：自动不传上一镜人声音频，并在提示词注明仅借画面身份、保持静默，避免参考轨把台词续进静默镜
+1. 填 **续接帧数** CSV（与分镜时长同格式）。例 `0,5,0,5,5,5`：第 3 镜为 `0`=不续接；非 0=取上一镜末 N 帧。点「刷新分镜信息」可生成默认 `0,22,22,…`（第 1 镜 0）。**成片查找前缀** 填 `ShortDrama_`（不是「保存文件名」）
+2. 常用接线示例：
+   - `上一镜末帧` → 绑定 → MiniMax `ref_image_*`（I2VA）
+   - 需要参考视频时：`上一镜视频` → `ref_video_0`，`上一镜音频` → `ref_video_audio_0` / `ref_audio_0`
+   - 需要 latent 续接时：用「保存/加载本镜 Latent」+ Motion Context（见下），可不接 ref_video
+3. 绑定打开 **末帧作首帧**（默认开）时，提示词会写成 I2VA 首帧对齐
+4. 第 1 镜、续接帧数为 0、或找不到成片时输出为 `None`，下游跳过
+5. 参考视频会压到合法帧数并缩小短边；无对白镜自动不传上一镜人声音频
 
-第 1 镜（或找不到成片）：绑定右侧「上一镜末帧」为空（`None`），MiniMax 跳过该参考图。关闭「末帧续接」同理。不足 5 帧会自动补齐。
+### Latent 续接（可选，自行接线）
+
+依赖 `ComfyUI-H3-Motion-Context`。
+
+```
+Sampler ──► 保存本镜 Latent (shot_index)
+分镜选择 shot_index ──► 加载上一镜 Latent ──► Motion Context.context_latent
+分镜选择 续接帧数 ──► 加载上一镜 Latent（0=通传）
+分镜选择 续接帧数 ──►「续接帧数→Motion Context」──► Motion Context.context_length
+ReferenceToVideo ──► Motion Context ──► Guider
+Decode ──► Motion Context Trim ──► CreateVideo ──► SaveVideo
+```
+
+- Motion Context 保持原版下拉 `context_length`（22/5/39/56）；由适配节点对齐 CSV
+- 推荐 `audio_context_length=24`
+- 全片分辨率须一致（latent 不可缩放）
 
 ## 例图
 

@@ -245,6 +245,13 @@ function formatShotDurations(data) {
     .join(",");
 }
 
+/** 默认续接帧数 CSV：第 1 镜 0，其后 22（与分镜时长同格式） */
+function formatShotTailFrames(data) {
+  const n = listShotClips(data).length;
+  if (!n) return "";
+  return Array.from({ length: n }, (_, i) => (i === 0 ? "0" : "22")).join(",");
+}
+
 function totalDurationSeconds(data) {
   return listShotClips(data).reduce((sum, { clips }) => {
     const v = clips.reduce((s, c) => s + clipDuration(c), 0);
@@ -357,16 +364,25 @@ function refreshSelectorStatus(node, { syncCount = false, syncDurations = false 
     const parsed = raw ? parsePrompt(raw) : null;
     const shots = parsed ? listShotClips(parsed).map((s) => s.name) : [];
     const durWidget = findWidget(node, "分镜时长");
+    const tailWidget = findWidget(node, "续接帧数");
     const status = findWidget(node, "_shot_status");
     const idxWidget = findWidget(node, "开始分镜", "分镜索引", "shot_index");
     const endWidget = findWidget(node, "结束分镜", "分镜结束", "分镜数量");
     const csv = parsed ? formatShotDurations(parsed) : "";
+    const tailCsv = parsed ? formatShotTailFrames(parsed) : "";
 
     _suppressWidgetRefresh = true;
     try {
       if (syncCount && endWidget && shots.length) applyWidgetValue(node, endWidget, shots.length);
       if (durWidget && ((syncDurations && csv) || (!String(durWidget.value || "").trim() && csv))) {
         applyWidgetValue(node, durWidget, csv);
+      }
+      if (
+        tailWidget &&
+        typeof tailWidget.value !== "boolean" &&
+        ((syncDurations && tailCsv) || (!String(tailWidget.value ?? "").trim() && tailCsv))
+      ) {
+        applyWidgetValue(node, tailWidget, tailCsv);
       }
       const start = Number(idxWidget?.value ?? 1);
       const last = Number(endWidget?.value ?? start);
@@ -385,15 +401,16 @@ function refreshSelectorStatus(node, { syncCount = false, syncDurations = false 
         const cur = Math.min(Math.max(1, Number(idxWidget?.value ?? 1)), total);
         const last = Math.min(Math.max(cur, Number(endWidget?.value ?? cur)), total);
         const batch = cur === last ? `只跑第 ${cur} 镜` : `本批 ${cur}–${last} 镜`;
-        const contW = findWidget(node, "末帧续接");
-        const secW = findWidget(node, "续接秒数");
-        const cont = contW ? (contW.value ? "末帧续接开" : "末帧续接关") : "";
-        let sec = "";
-        if (contW?.value && secW != null) {
-          const v = Number(secW.value);
-          sec = v <= 0 ? "整段" : `末${v}秒`;
-        }
-        status.value = `共${total}镜｜${batch}｜时长 ${String(durWidget?.value || csv)}${cont ? "｜" + cont : ""}${sec ? "｜" + sec : ""}`;
+        const tails = String(tailWidget?.value || tailCsv || "");
+        const parts = tails.split(/[,，]/).map((x) => x.trim()).filter(Boolean);
+        const curTail = parts[cur - 1];
+        const curHint =
+          curTail == null || curTail === ""
+            ? ""
+            : Number(curTail) <= 0
+              ? "本镜不续接"
+              : `本镜末${curTail}帧`;
+        status.value = `共${total}镜｜${batch}｜时长 ${String(durWidget?.value || csv)}｜续接 ${tails || "—"}${curHint ? "｜" + curHint : ""}`;
       }
     }
     app.graph?.setDirtyCanvas?.(true, true);
@@ -464,7 +481,7 @@ app.registerExtension({
               refreshSelectorStatus(node, { syncCount: true, syncDurations: true });
             });
           }
-          for (const name of ["开始分镜", "结束分镜", "分镜索引", "分镜结束", "分镜时长", "末帧续接", "续接秒数", "prefix_root"]) {
+          for (const name of ["开始分镜", "结束分镜", "分镜索引", "分镜结束", "分镜时长", "续接帧数", "成片查找前缀"]) {
             const w = node.widgets?.find((x) => x.name === name);
             if (!w) continue;
             const prev = w.callback;

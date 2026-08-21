@@ -167,7 +167,7 @@ def shot_has_dialogue(text: str) -> bool:
 
 
 def _inject_prev_frame_prompt(text: str, as_first_frame: bool) -> str:
-    """确保提示词引用 <上一镜末帧>；可选写成 I2VA 首帧对齐；并点明上一镜视频/音频参考。"""
+    """确保提示词引用 <上一镜末帧>；可选写成 I2VA 首帧对齐。是否接 ref_video/audio/latent 由工作流自行接线。"""
     tag = f"<{PREV_FRAME_SLOT}>"
     t = (text or "").strip()
     if as_first_frame:
@@ -193,20 +193,6 @@ def _inject_prev_frame_prompt(text: str, as_first_frame: bool) -> str:
             t = f"{line}\n\n{t}" if t else line
     elif tag not in t:
         t = f"{t}\n\nReference still: {tag} is the last frame of the previous shot for continuity.".strip()
-
-    if shot_has_dialogue(t):
-        av_note = (
-            "The previous shot is also provided as reference video 0 with its soundtrack as reference audio 0 "
-            "for identity, motion, and sound continuity."
-        )
-    else:
-        # 无对白镜：只借画面身份/动作，明确禁止从参考轨续说
-        av_note = (
-            "The previous shot is provided as reference video 0 for identity and motion continuity only. "
-            "Do not reuse its spoken dialogue. This shot stays fully silent: closed lips, no speech, no mouthing."
-        )
-    if "reference video 0" not in t.lower():
-        t = f"{t}\n\n{av_note}"
     return t
 
 
@@ -312,9 +298,27 @@ def override_shot_duration(csv: str, index: int, fallback: float) -> float:
     return v if v > 0 else float(fallback)
 
 
-_CLIP_TEXT_KEYS = ("场景", "镜头", "画面", "声音", "构图", "光影", "衔接", "禁止", "对白", "内容", "H3", "h3")
-# 直通英文提示词：有任一字段则不再 dumping 中文 JSON
-_H3_KEYS = ("内容", "H3", "h3")
+def override_shot_tail_frames(csv: str | int | float | None, index: int, fallback: int = 0) -> int:
+    """按镜解析续接帧数 CSV（与分镜时长同格式）。0=该镜不续接；空串用 fallback。兼容旧版单整数。"""
+    if isinstance(csv, bool):
+        return max(0, int(fallback))
+    if isinstance(csv, (int, float)):
+        return max(0, int(csv))
+    parts = [p.strip() for p in str(csv or "").replace("，", ",").split(",") if p.strip() != ""]
+    if not parts:
+        return max(0, int(fallback))
+    i = max(1, int(index)) - 1
+    if i >= len(parts):
+        return max(0, int(fallback))
+    try:
+        return max(0, int(float(parts[i])))
+    except ValueError:
+        return max(0, int(fallback))
+
+
+_CLIP_TEXT_KEYS = ("场景", "镜头", "画面", "声音", "构图", "光影", "衔接", "禁止", "对白", "内容")
+# 直通英文提示词：有「内容」字段则不再 dumping 中文 JSON
+_H3_KEYS = ("内容",)
 
 
 def _clip_blob(clips: list) -> str:
@@ -368,7 +372,7 @@ def _expand_clips_refs(clips: list, pics: dict[str, int]) -> list:
             out.append(c)
             continue
         nc = dict(c)
-        for key in ("场景", "镜头", "画面", "声音", "构图", "光影", "衔接", "禁止", "内容", "H3", "h3"):
+        for key in ("场景", "镜头", "画面", "声音", "构图", "光影", "衔接", "禁止", "内容"):
             if isinstance(nc.get(key), str):
                 nc[key] = _expand_ref_tags(nc[key], pics)
         out.append(nc)
@@ -376,7 +380,7 @@ def _expand_clips_refs(clips: list, pics: dict[str, int]) -> list:
 
 
 def _h3_from_clips(clips: list) -> str:
-    """分镜若写了「内容」或 H3 字段，直接把英文提示词送给 MiniMax，不再 dumping 中文 JSON。"""
+    """分镜若写了「内容」字段，直接把英文提示词送给 MiniMax，不再 dumping 中文 JSON。"""
     parts: list[str] = []
     for c in clips:
         if not isinstance(c, dict):
@@ -714,16 +718,16 @@ def _ensure_minimax_ref_video(
     return video[-keep:].contiguous().clone()
 
 
-def _trim_tail_av(images: torch.Tensor, aud: dict | None, fps: float, seconds: float):
-    """只保留成片末尾 N 秒的视频帧与音频；seconds<=0 表示整段。"""
+def _trim_tail_av(images: torch.Tensor, aud: dict | None, fps: float, frames: int):
+    """只保留成片末尾 N 帧的视频与对应时长音频；frames<=0 表示整段。"""
     fps = max(float(fps or 0), 1e-3)
     total = int(images.shape[0])
-    sec = float(seconds)
-    if sec <= 0 or total <= 0:
+    n_req = int(frames)
+    if n_req <= 0 or total <= 0:
         video = images.contiguous().clone()
         n_keep = total
     else:
-        n_keep = max(1, min(total, int(round(sec * fps))))
+        n_keep = max(1, min(total, n_req))
         video = images[-n_keep:].contiguous().clone()
 
     if aud is not None and isinstance(aud, dict) and aud.get("waveform") is not None:
@@ -732,10 +736,10 @@ def _trim_tail_av(images: torch.Tensor, aud: dict | None, fps: float, seconds: f
         if w.dim() == 2:
             w = w.unsqueeze(0)
         t = int(w.shape[-1])
-        if sec <= 0:
+        if n_req <= 0:
             samples_keep = t
         else:
-            samples_keep = max(1, min(t, int(round(sec * sr))))
+            samples_keep = max(1, min(t, int(round(n_keep / fps * sr))))
         aud_out = {"waveform": w[..., -samples_keep:].contiguous().clone(), "sample_rate": sr}
     else:
         samples = max(1024, int(round(max(n_keep, 1) / fps * 44100)))
@@ -750,14 +754,14 @@ def _load_prev_shot_bundle(
     enabled: bool = True,
     batch_first: int = 1,
     prefix_root: str = "ShortDrama_",
-    tail_seconds: float = 5.0,
+    tail_frames: int = 22,
 ):
     """取上一镜末帧/视频/音频。无上一镜时三者皆为 None（与未引用参考图一样，下游跳过不传）。"""
     def _none(msg: str):
         return None, None, None, msg
 
     if not enabled:
-        return _none("末帧续接关闭")
+        return _none("续接帧数为0或不启用")
     idx = int(shot_index)
     first = int(batch_first) if int(batch_first or 0) > 0 else 1
     if idx <= first:
@@ -774,15 +778,15 @@ def _load_prev_shot_bundle(
         return _none(f"上一镜序号无效: {prev_i}")
 
     prev_name = shots[prev_i - 1][0]
-    root = str(prefix_root or "ShortDrama_")
+    root = str(prefix_root or "ShortDrama_").strip() or "ShortDrama_"
     path = _latest_mp4(folder_paths.get_output_directory(), f"{root}{prev_name}")
     if not path:
         return _none(f"未找到上一镜视频: {root}{prev_name}*.mp4（请先跑完上一镜并 SaveVideo）")
 
     try:
         images, aud, fps = _load_video_av(path)
-        tail_sec = float(tail_seconds if tail_seconds is not None else 1.0)
-        video, aud, n_keep = _trim_tail_av(images, aud, fps, tail_sec)
+        n_tail = int(tail_frames if tail_frames is not None else 22)
+        video, aud, n_keep = _trim_tail_av(images, aud, fps, n_tail)
         # 先缩小再截合法帧数，避免第 2 镜 VAE 编码参考视频卡死
         video = _downscale_ref_video(video)
         video = _ensure_minimax_ref_video(video)
@@ -801,10 +805,10 @@ def _load_prev_shot_bundle(
     except Exception as exc:
         return _none(f"读上一镜成片失败: {exc}")
 
-    if float(tail_seconds or 0) <= 0:
+    if int(tail_frames or 0) <= 0:
         clip_desc = f"整段→{int(video.shape[0])}帧"
     else:
-        clip_desc = f"末{float(tail_seconds):g}秒源{n_keep}→参考{int(video.shape[0])}帧@{int(video.shape[2])}x{int(video.shape[1])}"
+        clip_desc = f"末{n_keep}帧源→参考{int(video.shape[0])}帧@{int(video.shape[2])}x{int(video.shape[1])}"
     info = f"已取 {os.path.basename(path)} → 分镜{idx}｜末帧 + {clip_desc} + 音频"
     _log.info("[ShortDramaJSON] %s", info)
     return frame, video, aud, info
@@ -819,12 +823,12 @@ class ShortDramaJSONPrevLastFrame:
             "required": {
                 "prompt_json": ("STRING", {"forceInput": True, "multiline": True, "default": ""}),
                 "shot_index": ("INT", {"default": 1, "min": 1, "max": 64, "step": 1}),
-                "prefix_root": ("STRING", {"default": "ShortDrama_"}),
+                "成片查找前缀": ("STRING", {"default": "ShortDrama_", "tooltip": "只填根前缀，如 ShortDrama_。用于按「前缀+分镜名」找成片；不是 SaveVideo 的保存文件名。"}),
             },
             "optional": {
                 "merge_batch_start": ("INT", {"default": 0, "min": 0, "max": 64}),
                 "启用": ("BOOLEAN", {"default": True}),
-                "续接秒数": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 120.0, "step": 0.5}),
+                "续接帧数": ("INT", {"default": 22, "min": 0, "max": 240, "step": 1, "tooltip": "截取上一镜最后 N 帧；0=不续接（本兼容节点）。主节点请用 CSV。"}),
             },
         }
 
@@ -838,18 +842,19 @@ class ShortDramaJSONPrevLastFrame:
         self,
         prompt_json,
         shot_index=1,
-        prefix_root="ShortDrama_",
+        成片查找前缀="ShortDrama_",
         merge_batch_start=0,
         启用=True,
-        续接秒数=1.0,
+        续接帧数=22,
     ):
+        n_tail = int(续接帧数 if 续接帧数 is not None else 22)
         frame, video, aud, info = _load_prev_shot_bundle(
             prompt_json,
             shot_index,
-            enabled=bool(启用),
+            enabled=bool(启用) and n_tail > 0,
             batch_first=int(merge_batch_start or 0),
-            prefix_root=prefix_root,
-            tail_seconds=float(续接秒数 if 续接秒数 is not None else 1.0),
+            prefix_root=成片查找前缀,
+            tail_frames=n_tail,
         )
         return frame, video, aud, (0 if video is None else 1), info
 
@@ -865,44 +870,36 @@ class ShortDramaJSONShotSelector:
                 "开始分镜": ("INT", {"default": 1, "min": 1, "max": 64, "step": 1, "tooltip": "按 JSON 分镜排列顺序从第几条开始（含）。键名如「分镜4」是分镜名，不等于序号。"}),
                 "结束分镜": ("INT", {"default": 1, "min": 1, "max": 64, "step": 1, "tooltip": "跑到顺序第几条（含）。2:2 只跑第2条。"}),
                 "分镜时长": ("STRING", {"default": "", "multiline": False}),
-                "末帧续接": (
-                    "BOOLEAN",
+                "续接帧数": (
+                    "STRING",
                     {
-                        "default": True,
-                        "tooltip": "打开后输出上一镜末帧/视频/音频；批首镜仍为不传（None）。",
+                        "default": "",
+                        "multiline": False,
+                        "tooltip": "与分镜时长同格式，按镜填续接帧数。例 0,5,0,5,5,5：第3镜为0=不续接；非0=取上一镜末 N 帧。第1镜通常为0。",
                     },
                 ),
-                "续接秒数": (
-                    "FLOAT",
-                    {
-                        "default": 1.0,
-                        "min": 0.0,
-                        "max": 120.0,
-                        "step": 0.5,
-                        "tooltip": "只截取上一镜最后 N 秒作参考；默认 1。实际还会压到最多 22 帧并缩小分辨率，避免第 2 镜 VAE 卡死。0=整段（仍会压帧）。",
-                    },
-                ),
-                "prefix_root": (
+                "成片查找前缀": (
                     "STRING",
                     {
                         "default": "ShortDrama_",
-                        "tooltip": "与 SaveVideo 文件名前缀一致，用于找上一镜成片。",
+                        "tooltip": "只填根前缀 ShortDrama_。查找上一镜用「成片查找前缀+分镜名」。不要填/不要接「保存文件名」（那是 ShortDrama_分镜N）。",
                     },
                 ),
             }
         }
 
-    RETURN_TYPES = ("STRING", "STRING", "INT", "INT", "FLOAT", "STRING", "IMAGE", "IMAGE", "AUDIO")
+    RETURN_TYPES = ("STRING", "STRING", "INT", "INT", "FLOAT", "STRING", "IMAGE", "IMAGE", "AUDIO", "INT")
     RETURN_NAMES = (
         "shot_prompt",
         "shot_name",
         "shot_index",
         "shot_count",
         "duration",
-        "filename_prefix",
+        "保存文件名",
         "上一镜末帧",
         "上一镜视频",
         "上一镜音频",
+        "续接帧数",
     )
     FUNCTION = "run"
     CATEGORY = CAT
@@ -913,26 +910,39 @@ class ShortDramaJSONShotSelector:
         开始分镜=None,
         结束分镜=None,
         分镜时长="",
-        末帧续接=True,
-        续接秒数=5.0,
-        prefix_root="ShortDrama_",
+        续接帧数="",
+        成片查找前缀="ShortDrama_",
         **kw,
     ):
         data = _parse_json(prompt_json)
         start = 开始分镜 if 开始分镜 is not None else kw.get("分镜索引", 1)
         end = 结束分镜 if 结束分镜 is not None else kw.get("分镜结束", kw.get("分镜数量", start))
         cur, remain = clamp_run(len(list_shots(data)), start, end)
-        prompt, name, _n, duration, prefix = build_shot_prompt(data, cur)
-        cont = bool(末帧续接 if 末帧续接 is not None else True)
-        tail = float(续接秒数 if 续接秒数 is not None else 1.0)
-        # 仅全局第 1 镜强制不传；其余镜找不到成片时也为 None（等于不传）
+        prompt, name, _n, duration, save_name = build_shot_prompt(data, cur)
+        # 兼容旧工作流 widgets：末帧续接(bool)+续接帧数(int) 错位进「续接帧数」「成片查找前缀」
+        raw_tail = 续接帧数 if 续接帧数 is not None else kw.get("续接帧数", "")
+        prefix = 成片查找前缀 if isinstance(成片查找前缀, str) else "ShortDrama_"
+        if isinstance(raw_tail, bool) or (
+            isinstance(raw_tail, str) and raw_tail.strip().lower() in ("true", "false")
+        ):
+            legacy_on = bool(raw_tail) if isinstance(raw_tail, bool) else raw_tail.strip().lower() == "true"
+            if isinstance(成片查找前缀, (int, float)) and not isinstance(成片查找前缀, bool):
+                n_tail = int(成片查找前缀) if legacy_on else 0
+                prefix = "ShortDrama_"
+            else:
+                n_tail = 22 if legacy_on else 0
+                prefix = str(成片查找前缀 or "ShortDrama_")
+        else:
+            n_tail = override_shot_tail_frames(raw_tail, cur, 0)
+            prefix = str(prefix or "ShortDrama_")
+        # 始终按本镜续接帧数输出；0=不续接（None）。是否接到 MiniMax / Motion Context 由工作流自行拉线
         frame, video, aud, _info = _load_prev_shot_bundle(
             prompt_json,
             cur,
-            enabled=cont,
+            enabled=n_tail > 0,
             batch_first=1,
-            prefix_root=prefix_root or "ShortDrama_",
-            tail_seconds=tail,
+            prefix_root=prefix,
+            tail_frames=n_tail,
         )
         # 无 <d> 对白的镜头：不传上一镜人声音频，避免参考轨把台词续进静默镜
         if aud is not None and not shot_has_dialogue(prompt):
@@ -944,10 +954,11 @@ class ShortDramaJSONShotSelector:
             cur,
             remain,
             float(override_shot_duration(分镜时长, cur, duration)),
-            prefix,
+            save_name,
             frame,
             video,
             aud,
+            int(n_tail),
         )
 
 
@@ -1078,6 +1089,170 @@ def _blocked3(msg: str | None = None):
     return (ExecutionBlocker(msg), ExecutionBlocker(None), ExecutionBlocker(None))
 
 
+# 与 H3 Motion Context Save/Load 同格式（video+audio safetensors），按分镜序号自动续接。
+_H3_LATENT_PREFIX = "h3_context/clip"
+try:
+    from safetensors.torch import load_file as _st_load, save_file as _st_save
+except ImportError:
+    _st_load = _st_save = None
+
+
+def _h3_streams_from_latent(latent):
+    samples = latent["samples"]
+    if hasattr(samples, "unbind"):
+        return list(samples.unbind())
+    if isinstance(samples, (list, tuple)):
+        return list(samples)
+    return [samples]
+
+
+def _h3_latent_slot_path(filename_prefix: str, clip_index: int) -> str:
+    root = folder_paths.get_output_directory()
+    p = (filename_prefix or _H3_LATENT_PREFIX).strip().replace("\\", "/").strip("/")
+    if "/" in p:
+        sub, name = p.rsplit("/", 1)
+        folder = os.path.join(root, *sub.split("/"))
+    else:
+        folder, name = root, p or "clip"
+    os.makedirs(folder, exist_ok=True)
+    return os.path.join(folder, "%s_%05d.safetensors" % (name, int(clip_index)))
+
+
+class ShortDramaJSONH3SaveLatent:
+    """保存本镜 Sampler 输出的 H3 AV latent，供下一镜 Motion Context 续接。"""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "latent": ("LATENT",),
+                "shot_index": ("INT", {"default": 1, "min": 1, "max": 9999}),
+                "filename_prefix": ("STRING", {"default": _H3_LATENT_PREFIX}),
+            }
+        }
+
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("latent_path",)
+    FUNCTION = "save"
+    CATEGORY = CAT
+    OUTPUT_NODE = True
+
+    def save(self, latent, shot_index=1, filename_prefix=_H3_LATENT_PREFIX):
+        if _st_save is None:
+            raise RuntimeError("ShortDramaJSON: safetensors 不可用，无法保存 latent")
+        parts = _h3_streams_from_latent(latent)
+        if len(parts) < 2:
+            raise ValueError("ShortDramaJSON: latent 无音频流，请接 H3 AV Sampler 输出")
+        video = parts[0].detach().cpu().contiguous()
+        audio = parts[1].detach().cpu().contiguous()
+        idx = max(1, int(shot_index))
+        path = _h3_latent_slot_path(filename_prefix, idx)
+        _st_save({"video": video, "audio": audio}, path, metadata={"format": "h3_motion_context_av_v1"})
+        _log.info("[ShortDramaJSON] saved H3 latent shot %s → %s", idx, path)
+        return {"ui": {"text": [f"已保存分镜{idx} latent"]}, "result": (path,)}
+
+
+class ShortDramaJSONH3LoadPrevLatent:
+    """按 shot_index 加载上一镜 latent；第 1 镜或缺失时返回 None（Motion Context 通传）。"""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "shot_index": ("INT", {"default": 1, "min": 1, "max": 9999}),
+                "filename_prefix": ("STRING", {"default": _H3_LATENT_PREFIX}),
+            },
+            "optional": {
+                "续接帧数": (
+                    "INT",
+                    {
+                        "default": -1,
+                        "min": -1,
+                        "max": 240,
+                        "step": 1,
+                        "tooltip": "接「分镜选择/循环」的续接帧数。0=本镜不续接（返回 None，Motion Context 通传）；-1/不接=只按 shot_index。",
+                    },
+                ),
+            },
+        }
+
+    RETURN_TYPES = ("LATENT",)
+    RETURN_NAMES = ("context_latent",)
+    FUNCTION = "load"
+    CATEGORY = CAT
+
+    @classmethod
+    def IS_CHANGED(cls, shot_index, filename_prefix=_H3_LATENT_PREFIX, 续接帧数=-1):
+        if 续接帧数 is not None and int(续接帧数) == 0:
+            return "skip0"
+        prev = int(shot_index) - 1
+        if prev < 1:
+            return float("NaN")
+        path = _h3_latent_slot_path(filename_prefix, prev)
+        if not os.path.isfile(path):
+            return float("NaN")
+        return "%s:%d" % (path, os.stat(path).st_mtime_ns)
+
+    def load(self, shot_index, filename_prefix=_H3_LATENT_PREFIX, 续接帧数=-1):
+        if _st_load is None:
+            raise RuntimeError("ShortDramaJSON: safetensors 不可用，无法加载 latent")
+        if 续接帧数 is not None and int(续接帧数) == 0:
+            _log.info("[ShortDramaJSON] 续接帧数=0 → 不加载上一镜 latent（通传）")
+            return (None,)
+        prev = int(shot_index) - 1
+        if prev < 1:
+            _log.info("[ShortDramaJSON] shot %s 无上一镜 latent（通传）", shot_index)
+            return (None,)
+        path = _h3_latent_slot_path(filename_prefix, prev)
+        if not os.path.isfile(path):
+            _log.info("[ShortDramaJSON] 缺少上一镜 latent: %s（通传）", path)
+            return (None,)
+        data = _st_load(path)
+        if "video" not in data or "audio" not in data:
+            raise ValueError(f"ShortDramaJSON: 不是 H3 Motion Context latent: {path}")
+        _log.info("[ShortDramaJSON] loaded prev latent shot %s ← %s", prev, path)
+        return ({"samples": [data["video"], data["audio"]]},)
+
+
+# Motion Context 原版 context_length 为 COMBO ["22","5","39","56"]，不能直接接 INT
+_MOTION_CONTEXT_LENGTH_OPTS = ["22", "5", "39", "56"]
+
+
+class ShortDramaJSONMotionContextLength:
+    """续接帧数 INT → Motion Context context_length（COMBO），不改动 H3-Motion-Context 节点。"""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "续接帧数": (
+                    "INT",
+                    {
+                        "default": 22,
+                        "min": 0,
+                        "max": 240,
+                        "step": 1,
+                        "tooltip": "接「分镜选择/循环」的续接帧数。对齐到 5/22/39/56；0 时仍输出 22（请同时把续接帧数接到「加载上一镜 Latent」以通传）。",
+                    },
+                ),
+            }
+        }
+
+    RETURN_TYPES = (_MOTION_CONTEXT_LENGTH_OPTS,)
+    RETURN_NAMES = ("context_length",)
+    FUNCTION = "run"
+    CATEGORY = CAT
+
+    def run(self, 续接帧数=22):
+        n = int(续接帧数 if 续接帧数 is not None else 0)
+        if n <= 0:
+            return ("22",)
+        for g in (56, 39, 22, 5):
+            if g <= n:
+                return (str(g),)
+        return ("5",)
+
+
 class ShortDramaJSONConcatBatch:
     """未完成本批则自动 Queue 下一镜；最后一镜按分镜名拼接成片。"""
 
@@ -1087,7 +1262,13 @@ class ShortDramaJSONConcatBatch:
             "required": {
                 "shot_index": ("INT", {"default": 1, "min": 1, "max": 64}),
                 "shot_count": ("INT", {"default": 1, "min": 1, "max": 64}),
-                "prefix_root": ("STRING", {"default": "ShortDrama_"}),
+                "成片查找前缀": (
+                    "STRING",
+                    {
+                        "default": "ShortDrama_",
+                        "tooltip": "只填根前缀 ShortDrama_。拼接时按「成片查找前缀+分镜名」找各镜文件。不要接「保存文件名」。",
+                    },
+                ),
             },
             "optional": {
                 "trigger": ("VIDEO",),
@@ -1102,10 +1283,11 @@ class ShortDramaJSONConcatBatch:
     CATEGORY = CAT
     OUTPUT_NODE = True
 
-    def run(self, shot_index, shot_count, prefix_root="ShortDrama_", trigger=None, merge_batch_start=0, prompt=None):
+    def run(self, shot_index, shot_count, 成片查找前缀="ShortDrama_", trigger=None, merge_batch_start=0, prompt=None):
         _ = trigger
         idx, remain = int(shot_index), int(shot_count)
         batch_start = int(merge_batch_start or 0)
+        root = str(成片查找前缀 or "ShortDrama_").strip() or "ShortDrama_"
 
         # 本批未结束：续跑下一镜，下游成片先挡住
         if remain > 1:
@@ -1127,7 +1309,6 @@ class ShortDramaJSONConcatBatch:
 
         # 最后一镜：按分镜名拼接
         out_dir = folder_paths.get_output_directory()
-        root = str(prefix_root or "ShortDrama_")
         end = idx
         start = batch_start
         try:
@@ -1169,6 +1350,9 @@ NODE_CLASS_MAPPINGS = {
     "ShortDramaJSONPrevLastFrame": ShortDramaJSONPrevLastFrame,
     "ShortDramaJSONAutoNextShot": ShortDramaJSONAutoNextShot,
     "ShortDramaJSONConcatBatch": ShortDramaJSONConcatBatch,
+    "ShortDramaJSONH3SaveLatent": ShortDramaJSONH3SaveLatent,
+    "ShortDramaJSONH3LoadPrevLatent": ShortDramaJSONH3LoadPrevLatent,
+    "ShortDramaJSONMotionContextLength": ShortDramaJSONMotionContextLength,
 }
 NODE_DISPLAY_NAME_MAPPINGS = {
     "ShortDramaJSONSlotParser": "短剧JSON · 角色场景图绑定",
@@ -1176,4 +1360,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "ShortDramaJSONShotSelector": "短剧JSON · 分镜选择/循环",
     "ShortDramaJSONAutoNextShot": "短剧JSON · 续跑下一镜（已并入，可删）",
     "ShortDramaJSONConcatBatch": "短剧JSON · 续跑并拼接",
+    "ShortDramaJSONH3SaveLatent": "短剧JSON · 保存本镜 Latent",
+    "ShortDramaJSONH3LoadPrevLatent": "短剧JSON · 加载上一镜 Latent",
+    "ShortDramaJSONMotionContextLength": "短剧JSON · 续接帧数→Motion Context",
 }
