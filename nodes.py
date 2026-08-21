@@ -6,8 +6,10 @@ from __future__ import annotations
 import copy
 import glob
 import json
+import logging
 import os
 import re
+import threading
 import uuid
 import urllib.request
 from typing import Any
@@ -17,6 +19,8 @@ import torch
 from comfy.cli_args import args
 from comfy_execution.graph import ExecutionBlocker
 from server import PromptServer
+
+_log = logging.getLogger("ComfyUI-ShortDramaJSON")
 
 CAT = "short-drama/json"
 ROLE_KEYS = ("角色图片", "角色档案")
@@ -89,8 +93,17 @@ def _slot_count_from_names(names) -> int:
     return n
 
 
-def _apply_binder_schema(n: int) -> int:
-    return max(0, int(n))
+def _apply_binder_schema(n: int, cls=None) -> int:
+    """按槽位数登记 RETURN；左右同序：prompt_json, Picture_*, 上一镜末帧, shot_prompt, 总时长。"""
+    n = max(0, int(n))
+    target = cls
+    if target is None:
+        return n
+    names = ("prompt_json",) + tuple(f"Picture_{i}" for i in range(1, n + 1)) + ("上一镜末帧", "shot_prompt", "总时长")
+    types = ("STRING",) + tuple("IMAGE" for _ in range(n)) + ("IMAGE", "STRING", "FLOAT")
+    target.RETURN_NAMES = names
+    target.RETURN_TYPES = types
+    return n
 
 
 def _parse_json(raw: str) -> dict[str, Any]:
@@ -137,6 +150,64 @@ def _is_real_image(img) -> bool:
         return False
     t = img[0] if isinstance(img, (list, tuple)) and img else img
     return isinstance(t, torch.Tensor) and t.ndim >= 3 and t.numel() > 0
+
+
+def _is_usable_ref_image(img) -> bool:
+    """真实参考图（排除空值）。"""
+    return _is_real_image(img)
+
+
+PREV_FRAME_SLOT = "上一镜末帧"
+_DIALOGUE_TAG = re.compile(r"<d>\s*\[[^\]]*\]\s*.+?</d>", re.I | re.S)
+
+
+def shot_has_dialogue(text: str) -> bool:
+    """本镜提示词是否含 <d>…</d> 对白。无对白镜不应再喂上一镜人声音频。"""
+    return bool(_DIALOGUE_TAG.search(text or ""))
+
+
+def _inject_prev_frame_prompt(text: str, as_first_frame: bool) -> str:
+    """确保提示词引用 <上一镜末帧>；可选写成 I2VA 首帧对齐；并点明上一镜视频/音频参考。"""
+    tag = f"<{PREV_FRAME_SLOT}>"
+    t = (text or "").strip()
+    if as_first_frame:
+        line = (
+            f"For the target video, at 0.00 seconds into the target video, "
+            f"{tag} (from [Shot 1]) is fully referenced."
+        )
+        if "is fully referenced" in t[:400] or "How the reference pictures align" in t[:400]:
+            if tag not in t:
+                t = f"{t}\n\nContinuity anchor: {tag} is the last frame of the previous shot."
+        elif not t:
+            t = line
+        elif tag in t and line.split(tag)[0] in t:
+            pass
+        else:
+            t = re.sub(
+                r"^For the target video, at 0\.00 seconds into the target video, .+? is fully referenced\.\s*",
+                "",
+                t,
+                count=1,
+                flags=re.I | re.S,
+            ).strip()
+            t = f"{line}\n\n{t}" if t else line
+    elif tag not in t:
+        t = f"{t}\n\nReference still: {tag} is the last frame of the previous shot for continuity.".strip()
+
+    if shot_has_dialogue(t):
+        av_note = (
+            "The previous shot is also provided as reference video 0 with its soundtrack as reference audio 0 "
+            "for identity, motion, and sound continuity."
+        )
+    else:
+        # 无对白镜：只借画面身份/动作，明确禁止从参考轨续说
+        av_note = (
+            "The previous shot is provided as reference video 0 for identity and motion continuity only. "
+            "Do not reuse its spoken dialogue. This shot stays fully silent: closed lips, no speech, no mouthing."
+        )
+    if "reference video 0" not in t.lower():
+        t = f"{t}\n\n{av_note}"
+    return t
 
 
 def apply_bound_pictures(text: str, bound_name_to_pic: dict[str, int]) -> str:
@@ -241,8 +312,9 @@ def override_shot_duration(csv: str, index: int, fallback: float) -> float:
     return v if v > 0 else float(fallback)
 
 
-_CLIP_TEXT_KEYS = ("场景", "镜头", "画面", "声音", "构图", "光影", "衔接", "禁止", "对白", "H3", "h3")
-_H3_KEYS = ("H3", "h3")
+_CLIP_TEXT_KEYS = ("场景", "镜头", "画面", "声音", "构图", "光影", "衔接", "禁止", "对白", "内容", "H3", "h3")
+# 直通英文提示词：有任一字段则不再 dumping 中文 JSON
+_H3_KEYS = ("内容", "H3", "h3")
 
 
 def _clip_blob(clips: list) -> str:
@@ -296,7 +368,7 @@ def _expand_clips_refs(clips: list, pics: dict[str, int]) -> list:
             out.append(c)
             continue
         nc = dict(c)
-        for key in ("场景", "镜头", "画面", "声音", "构图", "光影", "衔接", "禁止", "H3", "h3"):
+        for key in ("场景", "镜头", "画面", "声音", "构图", "光影", "衔接", "禁止", "内容", "H3", "h3"):
             if isinstance(nc.get(key), str):
                 nc[key] = _expand_ref_tags(nc[key], pics)
         out.append(nc)
@@ -304,7 +376,7 @@ def _expand_clips_refs(clips: list, pics: dict[str, int]) -> list:
 
 
 def _h3_from_clips(clips: list) -> str:
-    """分镜若写了 H3 字段，直接把英文 H3 提示词送给 MiniMax，不再 dumping 中文 JSON。"""
+    """分镜若写了「内容」或 H3 字段，直接把英文提示词送给 MiniMax，不再 dumping 中文 JSON。"""
     parts: list[str] = []
     for c in clips:
         if not isinstance(c, dict):
@@ -487,13 +559,34 @@ class ShortDramaJSONSlotParser:
                         "tooltip": "接「分镜选择/循环」的 shot_prompt；只放行本镜引用的参考图。角色槽可不接图。",
                     },
                 ),
+                "上一镜末帧": (
+                    "IMAGE",
+                    {
+                        "tooltip": "接「上一镜末帧」节点。有有效图时自动并入末位 Picture，并写入提示词。",
+                    },
+                ),
+                "末帧续接": (
+                    "BOOLEAN",
+                    {
+                        "default": True,
+                        "tooltip": "开启后预留末位 Picture 槽，并把上一镜末帧并入参考图。",
+                    },
+                ),
+                "末帧作首帧": (
+                    "BOOLEAN",
+                    {
+                        "default": True,
+                        "tooltip": "把上一镜末帧写成 I2VA 首帧对齐（0.00s fully referenced）。",
+                    },
+                ),
             },
         }
 
     RETURN_TYPES = _FLEX_RETURNS
-    RETURN_NAMES = ("prompt_json", "shot_prompt", "总时长")
+    RETURN_NAMES = ("prompt_json", "上一镜末帧", "shot_prompt", "总时长")
     FUNCTION = "run"
     CATEGORY = CAT
+
 
     @classmethod
     def VALIDATE_INPUTS(cls, input_types=None, prompt_json=None, **kwargs):
@@ -504,10 +597,25 @@ class ShortDramaJSONSlotParser:
             except Exception:
                 pass
         n = max(n, _slot_count_from_names(input_types), _slot_count_from_names(kwargs))
-        _apply_binder_schema(n)
+        # 末帧续接多预留一槽
+        cont = kwargs.get("末帧续接", True)
+        if cont is None and isinstance(input_types, dict):
+            cont = True
+        if cont:
+            n += 1
+        _apply_binder_schema(n, cls)
         return True
 
-    def run(self, prompt_json, 总时长=10.0, shot_prompt=None, **kwargs):
+    def run(
+        self,
+        prompt_json,
+        总时长=10.0,
+        shot_prompt=None,
+        上一镜末帧=None,
+        末帧续接=True,
+        末帧作首帧=True,
+        **kwargs,
+    ):
         if not isinstance(prompt_json, str):
             prompt_json = "" if prompt_json is None else str(prompt_json)
         if not isinstance(shot_prompt, str):
@@ -515,20 +623,240 @@ class ShortDramaJSONSlotParser:
         data = _parse_json(prompt_json)
         slots = discover_slots(data)
         n = len(slots) or _slot_count_from_names(kwargs)
-        _apply_binder_schema(n)
+        # 末帧续接：有有效上一镜末帧才并入；没有就空槽（None），不传假图
+        use_prev = bool(末帧续接) and _is_usable_ref_image(上一镜末帧)
+        out_n = n + (1 if bool(末帧续接) else 0)
+        _apply_binder_schema(out_n, self.__class__)
         gate = resolve_picture_gate(shot_prompt, data)
         bound, pics = bind_slot_images(slots, kwargs, gate)
         if n > len(pics):
             pics.extend([None] * (n - len(pics)))
-        rewritten = apply_bound_pictures(shot_prompt or "", bound)
+        pics = list(pics[:n])
+
+        text = shot_prompt or ""
+        prev_out = None
+        if use_prev:
+            text = _inject_prev_frame_prompt(text, bool(末帧作首帧))
+            compact = max(bound.values(), default=0) + 1
+            bound[PREV_FRAME_SLOT] = compact
+            pics.append(上一镜末帧)
+            prev_out = 上一镜末帧
+        elif bool(末帧续接):
+            pics.append(None)  # 预留槽位但空，MiniMax 跳过
+
+        rewritten = apply_bound_pictures(text, bound)
         if not rewritten.strip():
             rewritten = prompt_json or ""
         dur = 总时长 if 总时长 is not None else kwargs.get("时长微调", 10.0)
-        # 顺序：prompt_json, Picture_1..N, shot_prompt, 总时长 —— Picture 槽位从 1 起，避免挤乱 MiniMax 参考图连线
-        return (prompt_json or "",) + tuple(pics[:n]) + (rewritten, float(dur))
+        # 与输入同序：prompt_json, Picture_1..out_n, 上一镜末帧, shot_prompt, 总时长
+        return (prompt_json or "",) + tuple(pics[:out_n]) + (prev_out, rewritten, float(dur))
+
+
+def _silent_audio(num_samples: int = 1024, sample_rate: int = 44100) -> dict:
+    n = max(1, int(num_samples))
+    return {"waveform": torch.zeros((1, 1, n), dtype=torch.float32), "sample_rate": int(sample_rate)}
+
+
+# MiniMax H3：参考视频至少 5 帧，且裁切后须满足 n % 17 == 5（5 / 22 / 39… 合法）
+_MINIMAX_REF_VIDEO_MIN_FRAMES = 5
+# 续跑默认最多 22 帧（≈0.9s@24fps）。传满 5 秒会在第 2 镜 VAE 编码参考视频时长时间假死。
+_MINIMAX_REF_VIDEO_MAX_FRAMES = 22
+_REF_VIDEO_MAX_SHORT_EDGE = 768
+
+
+def _largest_valid_ref_frames(n: int, cap: int) -> int:
+    """最大合法帧数：<=min(n,cap) 且 n%17==5（不足则退到 5）。"""
+    n = min(int(n), int(cap))
+    if n < _MINIMAX_REF_VIDEO_MIN_FRAMES:
+        return _MINIMAX_REF_VIDEO_MIN_FRAMES
+    while n > _MINIMAX_REF_VIDEO_MIN_FRAMES and n % 17 != 5:
+        n -= 1
+    if n % 17 != 5:
+        return _MINIMAX_REF_VIDEO_MIN_FRAMES
+    return n
+
+
+def _downscale_ref_video(images: torch.Tensor, max_short: int = _REF_VIDEO_MAX_SHORT_EDGE) -> torch.Tensor:
+    """缩小参考视频短边，降低第 2 镜起 VAE 编码压力。"""
+    if images is None or int(images.shape[0]) <= 0:
+        return images
+    h, w = int(images.shape[1]), int(images.shape[2])
+    short = min(h, w)
+    if short <= int(max_short):
+        return images.contiguous()
+    scale = float(max_short) / float(short)
+    nh = max(16, int(round(h * scale / 16.0) * 16))
+    nw = max(16, int(round(w * scale / 16.0) * 16))
+    x = torch.nn.functional.interpolate(
+        images.permute(0, 3, 1, 2).float(),
+        size=(nh, nw),
+        mode="bilinear",
+        align_corners=False,
+    )
+    return x.permute(0, 2, 3, 1).contiguous().clamp(0.0, 1.0)
+
+
+def _ensure_minimax_ref_video(
+    images: torch.Tensor,
+    *,
+    max_frames: int = _MINIMAX_REF_VIDEO_MAX_FRAMES,
+) -> torch.Tensor:
+    """补齐/裁到 MiniMax 参考视频合法帧数；从末尾截取（保留衔接关键帧）。"""
+    video = images.contiguous()
+    n = int(video.shape[0])
+    if n < _MINIMAX_REF_VIDEO_MIN_FRAMES:
+        last = video[-1:]
+        pad = last.expand(_MINIMAX_REF_VIDEO_MIN_FRAMES - n, *video.shape[1:]).clone()
+        video = torch.cat([video, pad], dim=0)
+        n = int(video.shape[0])
+    keep = _largest_valid_ref_frames(n, max_frames)
+    # 必须取尾部：video[:keep] 会丢掉真正的上一镜末帧
+    return video[-keep:].contiguous().clone()
+
+
+def _trim_tail_av(images: torch.Tensor, aud: dict | None, fps: float, seconds: float):
+    """只保留成片末尾 N 秒的视频帧与音频；seconds<=0 表示整段。"""
+    fps = max(float(fps or 0), 1e-3)
+    total = int(images.shape[0])
+    sec = float(seconds)
+    if sec <= 0 or total <= 0:
+        video = images.contiguous().clone()
+        n_keep = total
+    else:
+        n_keep = max(1, min(total, int(round(sec * fps))))
+        video = images[-n_keep:].contiguous().clone()
+
+    if aud is not None and isinstance(aud, dict) and aud.get("waveform") is not None:
+        w = aud["waveform"]
+        sr = int(aud.get("sample_rate") or 44100)
+        if w.dim() == 2:
+            w = w.unsqueeze(0)
+        t = int(w.shape[-1])
+        if sec <= 0:
+            samples_keep = t
+        else:
+            samples_keep = max(1, min(t, int(round(sec * sr))))
+        aud_out = {"waveform": w[..., -samples_keep:].contiguous().clone(), "sample_rate": sr}
+    else:
+        samples = max(1024, int(round(max(n_keep, 1) / fps * 44100)))
+        aud_out = _silent_audio(samples, 44100)
+    return video, aud_out, n_keep
+
+
+def _load_prev_shot_bundle(
+    prompt_json,
+    shot_index: int,
+    *,
+    enabled: bool = True,
+    batch_first: int = 1,
+    prefix_root: str = "ShortDrama_",
+    tail_seconds: float = 5.0,
+):
+    """取上一镜末帧/视频/音频。无上一镜时三者皆为 None（与未引用参考图一样，下游跳过不传）。"""
+    def _none(msg: str):
+        return None, None, None, msg
+
+    if not enabled:
+        return _none("末帧续接关闭")
+    idx = int(shot_index)
+    first = int(batch_first) if int(batch_first or 0) > 0 else 1
+    if idx <= first:
+        return _none(f"分镜{idx}为批首，无上一镜成片")
+
+    try:
+        data = _parse_json(prompt_json)
+        shots = list_shots(data)
+    except Exception as exc:
+        return _none(f"JSON 无效: {exc}")
+
+    prev_i = idx - 1
+    if prev_i < 1 or prev_i > len(shots):
+        return _none(f"上一镜序号无效: {prev_i}")
+
+    prev_name = shots[prev_i - 1][0]
+    root = str(prefix_root or "ShortDrama_")
+    path = _latest_mp4(folder_paths.get_output_directory(), f"{root}{prev_name}")
+    if not path:
+        return _none(f"未找到上一镜视频: {root}{prev_name}*.mp4（请先跑完上一镜并 SaveVideo）")
+
+    try:
+        images, aud, fps = _load_video_av(path)
+        tail_sec = float(tail_seconds if tail_seconds is not None else 1.0)
+        video, aud, n_keep = _trim_tail_av(images, aud, fps, tail_sec)
+        # 先缩小再截合法帧数，避免第 2 镜 VAE 编码参考视频卡死
+        video = _downscale_ref_video(video)
+        video = _ensure_minimax_ref_video(video)
+        sr = int(aud.get("sample_rate") or 44100)
+        need = max(1024, int(round(video.shape[0] / max(float(fps), 1e-3) * sr)))
+        w = aud["waveform"]
+        if w.dim() == 2:
+            w = w.unsqueeze(0)
+        if w.shape[-1] < need:
+            pad = torch.zeros((*w.shape[:-1], need - w.shape[-1]), dtype=w.dtype, device=w.device)
+            w = torch.cat([w, pad], dim=-1)
+        elif w.shape[-1] > need:
+            w = w[..., -need:]
+        aud = {"waveform": w.contiguous().clone(), "sample_rate": sr}
+        frame = video[-1:].contiguous().clone()
+    except Exception as exc:
+        return _none(f"读上一镜成片失败: {exc}")
+
+    if float(tail_seconds or 0) <= 0:
+        clip_desc = f"整段→{int(video.shape[0])}帧"
+    else:
+        clip_desc = f"末{float(tail_seconds):g}秒源{n_keep}→参考{int(video.shape[0])}帧@{int(video.shape[2])}x{int(video.shape[1])}"
+    info = f"已取 {os.path.basename(path)} → 分镜{idx}｜末帧 + {clip_desc} + 音频"
+    _log.info("[ShortDramaJSON] %s", info)
+    return frame, video, aud, info
+
+
+class ShortDramaJSONPrevLastFrame:
+    """已并入「分镜选择/循环」。保留兼容旧工作流。"""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "prompt_json": ("STRING", {"forceInput": True, "multiline": True, "default": ""}),
+                "shot_index": ("INT", {"default": 1, "min": 1, "max": 64, "step": 1}),
+                "prefix_root": ("STRING", {"default": "ShortDrama_"}),
+            },
+            "optional": {
+                "merge_batch_start": ("INT", {"default": 0, "min": 0, "max": 64}),
+                "启用": ("BOOLEAN", {"default": True}),
+                "续接秒数": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 120.0, "step": 0.5}),
+            },
+        }
+
+    RETURN_TYPES = ("IMAGE", "IMAGE", "AUDIO", "INT", "STRING")
+    RETURN_NAMES = ("上一镜末帧", "上一镜视频", "上一镜音频", "has_prev", "info")
+    FUNCTION = "run"
+    CATEGORY = CAT
+    DEPRECATED = True
+
+    def run(
+        self,
+        prompt_json,
+        shot_index=1,
+        prefix_root="ShortDrama_",
+        merge_batch_start=0,
+        启用=True,
+        续接秒数=1.0,
+    ):
+        frame, video, aud, info = _load_prev_shot_bundle(
+            prompt_json,
+            shot_index,
+            enabled=bool(启用),
+            batch_first=int(merge_batch_start or 0),
+            prefix_root=prefix_root,
+            tail_seconds=float(续接秒数 if 续接秒数 is not None else 1.0),
+        )
+        return frame, video, aud, (0 if video is None else 1), info
 
 
 class ShortDramaJSONShotSelector:
+    """选当前镜；可选输出上一镜末帧 / video / audio（批首镜不传）。"""
+
     @classmethod
     def INPUT_TYPES(cls):
         return {
@@ -537,21 +865,90 @@ class ShortDramaJSONShotSelector:
                 "开始分镜": ("INT", {"default": 1, "min": 1, "max": 64, "step": 1, "tooltip": "按 JSON 分镜排列顺序从第几条开始（含）。键名如「分镜4」是分镜名，不等于序号。"}),
                 "结束分镜": ("INT", {"default": 1, "min": 1, "max": 64, "step": 1, "tooltip": "跑到顺序第几条（含）。2:2 只跑第2条。"}),
                 "分镜时长": ("STRING", {"default": "", "multiline": False}),
+                "末帧续接": (
+                    "BOOLEAN",
+                    {
+                        "default": True,
+                        "tooltip": "打开后输出上一镜末帧/视频/音频；批首镜仍为不传（None）。",
+                    },
+                ),
+                "续接秒数": (
+                    "FLOAT",
+                    {
+                        "default": 1.0,
+                        "min": 0.0,
+                        "max": 120.0,
+                        "step": 0.5,
+                        "tooltip": "只截取上一镜最后 N 秒作参考；默认 1。实际还会压到最多 22 帧并缩小分辨率，避免第 2 镜 VAE 卡死。0=整段（仍会压帧）。",
+                    },
+                ),
+                "prefix_root": (
+                    "STRING",
+                    {
+                        "default": "ShortDrama_",
+                        "tooltip": "与 SaveVideo 文件名前缀一致，用于找上一镜成片。",
+                    },
+                ),
             }
         }
 
-    RETURN_TYPES = ("STRING", "STRING", "INT", "INT", "FLOAT", "STRING")
-    RETURN_NAMES = ("shot_prompt", "shot_name", "shot_index", "shot_count", "duration", "filename_prefix")
+    RETURN_TYPES = ("STRING", "STRING", "INT", "INT", "FLOAT", "STRING", "IMAGE", "IMAGE", "AUDIO")
+    RETURN_NAMES = (
+        "shot_prompt",
+        "shot_name",
+        "shot_index",
+        "shot_count",
+        "duration",
+        "filename_prefix",
+        "上一镜末帧",
+        "上一镜视频",
+        "上一镜音频",
+    )
     FUNCTION = "run"
     CATEGORY = CAT
 
-    def run(self, prompt_json, 开始分镜=None, 结束分镜=None, 分镜时长="", **kw):
+    def run(
+        self,
+        prompt_json,
+        开始分镜=None,
+        结束分镜=None,
+        分镜时长="",
+        末帧续接=True,
+        续接秒数=5.0,
+        prefix_root="ShortDrama_",
+        **kw,
+    ):
         data = _parse_json(prompt_json)
         start = 开始分镜 if 开始分镜 is not None else kw.get("分镜索引", 1)
         end = 结束分镜 if 结束分镜 is not None else kw.get("分镜结束", kw.get("分镜数量", start))
         cur, remain = clamp_run(len(list_shots(data)), start, end)
         prompt, name, _n, duration, prefix = build_shot_prompt(data, cur)
-        return prompt, name, cur, remain, float(override_shot_duration(分镜时长, cur, duration)), prefix
+        cont = bool(末帧续接 if 末帧续接 is not None else True)
+        tail = float(续接秒数 if 续接秒数 is not None else 1.0)
+        # 仅全局第 1 镜强制不传；其余镜找不到成片时也为 None（等于不传）
+        frame, video, aud, _info = _load_prev_shot_bundle(
+            prompt_json,
+            cur,
+            enabled=cont,
+            batch_first=1,
+            prefix_root=prefix_root or "ShortDrama_",
+            tail_seconds=tail,
+        )
+        # 无 <d> 对白的镜头：不传上一镜人声音频，避免参考轨把台词续进静默镜
+        if aud is not None and not shot_has_dialogue(prompt):
+            _log.info("[ShortDramaJSON] shot %s silent → drop prev dialogue audio", cur)
+            aud = None
+        return (
+            prompt,
+            name,
+            cur,
+            remain,
+            float(override_shot_duration(分镜时长, cur, duration)),
+            prefix,
+            frame,
+            video,
+            aud,
+        )
 
 
 class ShortDramaJSONAutoNextShot:
@@ -597,22 +994,28 @@ def _queue_next_shot(prompt_dict: dict, next_index: int, remain: int, batch_star
     if not found:
         return "未找到分镜选择节点"
 
-    payload = {
-        "prompt": new_prompt,
-        "client_id": getattr(PromptServer.instance, "client_id", None) or str(uuid.uuid4()),
-    }
-    if not payload["client_id"]:
-        payload.pop("client_id", None)
+    client_id = getattr(PromptServer.instance, "client_id", None) or str(uuid.uuid4())
+    payload = {"prompt": new_prompt, "client_id": client_id}
     port = int(getattr(args, "port", 8188) or 8188)
-    req = urllib.request.Request(
-        f"http://127.0.0.1:{port}/prompt",
-        data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-    with urllib.request.urlopen(req, timeout=30) as resp:
-        body = resp.read().decode("utf-8", errors="ignore")
-    return f"已排队分镜{next_index}（剩余{remain}）｜{body[:100]}"
+    url = f"http://127.0.0.1:{port}/prompt"
+
+    def _post():
+        try:
+            req = urllib.request.Request(
+                url,
+                data=json.dumps(payload).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                body = resp.read().decode("utf-8", errors="ignore")
+            _log.info("[ShortDramaJSON] queued shot %s: %s", next_index, body[:200])
+        except Exception as exc:
+            _log.error("[ShortDramaJSON] queue shot %s failed: %s", next_index, exc)
+
+    # 异步入队，避免在当前执行线程里同步 HTTP 自调用导致阻塞/超时
+    threading.Thread(target=_post, name=f"ShortDramaJSON-queue-{next_index}", daemon=True).start()
+    return f"已异步排队分镜{next_index}（剩余{remain}）"
 
 
 def _load_video_av(path: str) -> tuple[torch.Tensor, dict | None, float]:
@@ -706,13 +1109,16 @@ class ShortDramaJSONConcatBatch:
 
         # 本批未结束：续跑下一镜，下游成片先挡住
         if remain > 1:
-            if not isinstance(prompt, dict) or not prompt:
+            if not isinstance(prompt, dict):
                 return {"ui": {"text": ["无法获取 prompt，续跑失败"]}, "result": _blocked3()}
+            if not prompt:
+                return {"ui": {"text": ["prompt 为空，续跑失败"]}, "result": _blocked3()}
             start = batch_start if batch_start > 0 else idx
             try:
                 msg = _queue_next_shot(prompt, idx + 1, remain - 1, start)
             except Exception as exc:
                 msg = f"续跑失败: {exc}"
+            _log.info("[ShortDramaJSON] concat batch remain=%s → %s", remain, msg)
             return {"ui": {"text": [msg]}, "result": _blocked3()}
 
         # 单镜批次：不拼
@@ -760,11 +1166,13 @@ class ShortDramaJSONConcatBatch:
 NODE_CLASS_MAPPINGS = {
     "ShortDramaJSONSlotParser": ShortDramaJSONSlotParser,
     "ShortDramaJSONShotSelector": ShortDramaJSONShotSelector,
+    "ShortDramaJSONPrevLastFrame": ShortDramaJSONPrevLastFrame,
     "ShortDramaJSONAutoNextShot": ShortDramaJSONAutoNextShot,
     "ShortDramaJSONConcatBatch": ShortDramaJSONConcatBatch,
 }
 NODE_DISPLAY_NAME_MAPPINGS = {
     "ShortDramaJSONSlotParser": "短剧JSON · 角色场景图绑定",
+    "ShortDramaJSONPrevLastFrame": "短剧JSON · 上一镜成片（已并入，可删）",
     "ShortDramaJSONShotSelector": "短剧JSON · 分镜选择/循环",
     "ShortDramaJSONAutoNextShot": "短剧JSON · 续跑下一镜（已并入，可删）",
     "ShortDramaJSONConcatBatch": "短剧JSON · 续跑并拼接",

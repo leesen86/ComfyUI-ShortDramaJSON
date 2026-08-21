@@ -70,25 +70,16 @@ function neededSlotCount(slots) {
   return Math.max(slots.length, ...slots.map((s) => Number(s.picture) || 0));
 }
 
-function syncBinderSockets(node, count) {
-  const n = Math.max(0, count | 0);
+function syncBinderSockets(node, count, reservePrev = false) {
+  const n = Math.max(0, count | 0) + (reservePrev ? 1 : 0);
   const keepIn = new Map();
   const keepOut = new Map();
+  // 保留所有已接线输入（含末帧续接等），避免加载时重排槽位后丢线/崩前端
   for (const inp of node.inputs || []) {
-    if (
-      (inp.name === "prompt_json" || inp.name === "shot_prompt" || /^Picture_\d+$/.test(inp.name)) &&
-      inp.link != null
-    ) {
-      keepIn.set(inp.name, inp.link);
-    }
+    if (inp?.name && inp.link != null) keepIn.set(inp.name, inp.link);
   }
   for (const out of node.outputs || []) {
-    if (
-      (/^Picture_\d+$/.test(out.name) || out.name === "总时长" || out.name === "prompt_json" || out.name === "shot_prompt") &&
-      out.links?.length
-    ) {
-      keepOut.set(out.name, [...out.links]);
-    }
+    if (out?.name && out.links?.length) keepOut.set(out.name, [...out.links]);
   }
 
   const retarget = (linkIds, originSlot) => {
@@ -106,6 +97,7 @@ function syncBinderSockets(node, count) {
 
   if (!node.inputs?.some((x) => x.name === "prompt_json")) node.addInput("prompt_json", "STRING");
   if (!node.inputs?.some((x) => x.name === "shot_prompt")) node.addInput("shot_prompt", "STRING");
+  if (!node.inputs?.some((x) => x.name === "上一镜末帧")) node.addInput("上一镜末帧", "IMAGE", { shape: 7 });
   if (!node.outputs?.some((x) => x.name === "prompt_json")) node.addOutput("prompt_json", "STRING");
   if (!node.outputs?.some((x) => x.name === "shot_prompt")) node.addOutput("shot_prompt", "STRING");
   for (let i = 1; i <= n; i++) {
@@ -114,6 +106,7 @@ function syncBinderSockets(node, count) {
     if (!node.outputs?.some((x) => x.name === name)) node.addOutput(name, "IMAGE");
   }
   if (!node.outputs?.some((x) => x.name === "总时长")) node.addOutput("总时长", "FLOAT");
+  if (!node.outputs?.some((x) => x.name === "上一镜末帧")) node.addOutput("上一镜末帧", "IMAGE");
 
   // 去掉 JSON 里没有的空槽（有连线的先留着，避免拆 MiniMax 线）
   if (node.inputs) {
@@ -132,39 +125,62 @@ function syncBinderSockets(node, count) {
   const byNameIn = Object.fromEntries((node.inputs || []).map((s) => [s.name, s]));
   const byNameOut = Object.fromEntries((node.outputs || []).map((s) => [s.name, s]));
   const keepExtraIn = (node.inputs || []).filter(
-    (s) => s.name !== "prompt_json" && s.name !== "shot_prompt" && !/^Picture_\d+$/.test(s.name)
+    (s) =>
+      s.name !== "prompt_json" &&
+      s.name !== "shot_prompt" &&
+      s.name !== "上一镜末帧" &&
+      !/^Picture_\d+$/.test(s.name)
   );
-  // shot_prompt 放最后，避免插入中间挤乱 Picture 槽位索引
+  // 左右同序：Picture_* → 上一镜末帧 → shot_prompt（总时长仅右侧）
   node.inputs = [
     "prompt_json",
     ...Array.from({ length: n }, (_, i) => `Picture_${i + 1}`),
+    "上一镜末帧",
     "shot_prompt",
   ]
     .map((name) => byNameIn[name])
     .filter(Boolean)
     .concat(keepExtraIn);
-  // Picture 紧跟 prompt_json，shot_prompt 放末尾前，避免旧工作流 MiniMax 参考图槽位错位
   node.outputs = [
     "prompt_json",
     ...Array.from({ length: n }, (_, i) => `Picture_${i + 1}`),
+    "上一镜末帧",
     "shot_prompt",
     "总时长",
   ]
     .map((name) => byNameOut[name])
     .filter(Boolean);
 
+  // 末帧续接：末位 Picture 左右都藏起来，改走专用「上一镜末帧」；旧 MiniMax 线迁过去
+  const prevPicName = reservePrev && n > 0 ? `Picture_${n}` : null;
+  if (prevPicName && keepOut.has(prevPicName)) {
+    const moved = keepOut.get(prevPicName) || [];
+    const dest = keepOut.get("上一镜末帧") || [];
+    keepOut.set("上一镜末帧", [...new Set([...dest, ...moved])]);
+    keepOut.delete(prevPicName);
+  }
+
   for (let i = 0; i < node.inputs.length; i++) {
     const inp = node.inputs[i];
-    if (inp) inp.hidden = false;
-    if (/^Picture_\d+$/.test(inp.name || "")) inp.shape = 7;
-    if (keepIn.has(inp.name)) {
-      inp.link = keepIn.get(inp.name);
-      retargetIn(inp.link, i);
+    if (!inp) continue;
+    const isPrevPic = prevPicName && inp.name === prevPicName;
+    inp.hidden = Boolean(isPrevPic);
+    if (/^Picture_\d+$/.test(inp.name || "") || inp.name === "上一镜末帧") inp.shape = 7;
+    if (inp.name === "上一镜末帧") {
+      inp.label = "上一镜末帧";
+      inp.localized_name = "上一镜末帧";
+    }
+    const linkId = keepIn.has(inp.name) ? keepIn.get(inp.name) : inp.link;
+    if (linkId != null) {
+      inp.link = linkId;
+      retargetIn(linkId, i);
     }
   }
   for (let i = 0; i < node.outputs.length; i++) {
     const out = node.outputs[i];
-    out.hidden = false;
+    if (!out) continue;
+    const isPrevPic = prevPicName && out.name === prevPicName;
+    out.hidden = Boolean(isPrevPic);
     if (out.name === "prompt_json") {
       out.label = "prompt_json";
       out.localized_name = "prompt_json";
@@ -175,14 +191,19 @@ function syncBinderSockets(node, count) {
       out.label = "总时长";
       out.localized_name = "总时长";
       out.widget = null;
+    } else if (out.name === "上一镜末帧") {
+      out.label = "上一镜末帧";
+      out.localized_name = "上一镜末帧";
     }
     if (keepOut.has(out.name)) {
       out.links = keepOut.get(out.name);
       retarget(out.links, i);
+    } else if (isPrevPic) {
+      out.links = null;
     }
   }
 
-  node.size[1] = Math.max(140, 120 + (n + 1) * 28);
+  node.size[1] = Math.max(140, 120 + (n + 3) * 28);
 }
 
 function clipDuration(clip) {
@@ -261,89 +282,124 @@ function findWidget(node, ...names) {
 }
 
 function refreshBinderLabels(node) {
-  const raw = readUpstreamPrompt(node);
-  const parsed = raw ? parsePrompt(raw) : null;
-  const slots = parsed ? discoverSlots(parsed) : [];
-  syncBinderSockets(node, neededSlotCount(slots));
+  try {
+    const raw = readUpstreamPrompt(node);
+    const parsed = raw ? parsePrompt(raw) : null;
+    const slots = parsed ? discoverSlots(parsed) : [];
+    const contW = findWidget(node, "末帧续接");
+    const reservePrev = contW ? Boolean(contW.value) : true;
+    syncBinderSockets(node, neededSlotCount(slots), reservePrev);
 
-  const totalSec = parsed ? totalDurationSeconds(parsed) : 0;
-  const durWidget = findWidget(node, "总时长", "时长微调");
-  if (durWidget && parsed) {
-    _suppressWidgetRefresh = true;
-    try {
-      applyWidgetValue(node, durWidget, totalSec);
-    } finally {
-      _suppressWidgetRefresh = false;
+    const totalSec = parsed ? totalDurationSeconds(parsed) : 0;
+    const durWidget = findWidget(node, "总时长", "时长微调");
+    if (durWidget && parsed) {
+      _suppressWidgetRefresh = true;
+      try {
+        applyWidgetValue(node, durWidget, totalSec);
+      } finally {
+        _suppressWidgetRefresh = false;
+      }
     }
-  }
 
-  const status = findWidget(node, "_slot_status");
-  if (status) {
-    status.value = !raw
-      ? "请从提示词节点改 JSON"
-      : !parsed
-        ? "上游 JSON 无效"
-        : slots.length
-          ? `共${slots.length}槽（角色可不接图）｜` + slots.map((s) => `${s.kind}·${s.name}`).join(" | ")
-          : "角色图片/场景图片为空（可不绑图）";
+    const status = findWidget(node, "_slot_status");
+    if (status) {
+      const base = !raw
+        ? "请从提示词节点改 JSON"
+        : !parsed
+          ? "上游 JSON 无效"
+          : slots.length
+            ? `共${slots.length}槽（角色可不接图）｜` + slots.map((s) => `${s.kind}·${s.name}`).join(" | ")
+            : "角色图片/场景图片为空（可不绑图）";
+      status.value = reservePrev ? `${base}｜+末帧续接` : base;
+    }
+    const durOut = node.outputs?.find((o) => o.name === "总时长");
+    if (durOut) {
+      durOut.label = "总时长";
+      durOut.localized_name = "总时长";
+      durOut.widget = null;
+    }
+    const byPic = new Map(slots.map((s) => [s.picture, s]));
+    const nSlots = neededSlotCount(slots);
+    const prevPic = reservePrev ? nSlots + 1 : -1;
+    for (const sock of [...(node.inputs || []), ...(node.outputs || [])]) {
+      if (sock.name === "总时长" || sock.name === "prompt_json" || sock.name === "shot_prompt") continue;
+      if (sock.name === "上一镜末帧") {
+        sock.label = "上一镜末帧";
+        sock.localized_name = "上一镜末帧";
+        sock.hidden = false;
+        continue;
+      }
+      const m = String(sock.name || "").match(/^Picture_(\d+)$/);
+      if (!m) continue;
+      const picNum = Number(m[1]);
+      const meta = byPic.get(picNum);
+      if (picNum === prevPic) {
+        // 末位 Picture 左右都隐藏，与专用「上一镜末帧」口对齐
+        sock.hidden = true;
+        sock.label = sock.name;
+        sock.localized_name = sock.name;
+      } else {
+        sock.hidden = false;
+        sock.label = meta ? `${meta.kind}·${meta.name}` : sock.name;
+        sock.localized_name = sock.label;
+      }
+    }
+    node.setDirtyCanvas?.(true, true);
+    app.graph?.setDirtyCanvas?.(true, true);
+  } catch (err) {
+    console.error("[ShortDramaJSON] refreshBinderLabels failed", err);
   }
-  const durOut = node.outputs?.find((o) => o.name === "总时长");
-  if (durOut) {
-    durOut.label = "总时长";
-    durOut.localized_name = "总时长";
-    durOut.widget = null;
-  }
-  const byPic = new Map(slots.map((s) => [s.picture, s]));
-  for (const sock of [...(node.inputs || []), ...(node.outputs || [])]) {
-    if (sock.name === "总时长" || sock.name === "prompt_json" || sock.name === "shot_prompt") continue;
-    const m = String(sock.name || "").match(/^Picture_(\d+)$/);
-    if (!m) continue;
-    const meta = byPic.get(Number(m[1]));
-    sock.hidden = false;
-    sock.label = meta ? `${meta.kind}·${meta.name}` : sock.name;
-    sock.localized_name = sock.label;
-  }
-  node.setDirtyCanvas?.(true, true);
-  app.graph?.setDirtyCanvas?.(true, true);
 }
 
 function refreshSelectorStatus(node, { syncCount = false, syncDurations = false } = {}) {
-  const raw = readUpstreamPrompt(node);
-  const parsed = raw ? parsePrompt(raw) : null;
-  const shots = parsed ? listShotClips(parsed).map((s) => s.name) : [];
-  const durWidget = findWidget(node, "分镜时长");
-  const status = findWidget(node, "_shot_status");
-  const idxWidget = findWidget(node, "开始分镜", "分镜索引", "shot_index");
-  const endWidget = findWidget(node, "结束分镜", "分镜结束", "分镜数量");
-  const csv = parsed ? formatShotDurations(parsed) : "";
-
-  _suppressWidgetRefresh = true;
   try {
-    if (syncCount && endWidget && shots.length) applyWidgetValue(node, endWidget, shots.length);
-    if (durWidget && ((syncDurations && csv) || (!String(durWidget.value || "").trim() && csv))) {
-      applyWidgetValue(node, durWidget, csv);
-    }
-    const start = Number(idxWidget?.value ?? 1);
-    const last = Number(endWidget?.value ?? start);
-    if (idxWidget && start > last) applyWidgetValue(node, idxWidget, last);
-    if (endWidget && Number(endWidget.value) < Number(idxWidget?.value ?? 1)) {
-      applyWidgetValue(node, endWidget, Number(idxWidget.value));
-    }
-  } finally {
-    _suppressWidgetRefresh = false;
-  }
+    const raw = readUpstreamPrompt(node);
+    const parsed = raw ? parsePrompt(raw) : null;
+    const shots = parsed ? listShotClips(parsed).map((s) => s.name) : [];
+    const durWidget = findWidget(node, "分镜时长");
+    const status = findWidget(node, "_shot_status");
+    const idxWidget = findWidget(node, "开始分镜", "分镜索引", "shot_index");
+    const endWidget = findWidget(node, "结束分镜", "分镜结束", "分镜数量");
+    const csv = parsed ? formatShotDurations(parsed) : "";
 
-  if (status) {
-    if (!shots.length) status.value = "未识别到分镜序列";
-    else {
-      const total = shots.length;
-      const cur = Math.min(Math.max(1, Number(idxWidget?.value ?? 1)), total);
-      const last = Math.min(Math.max(cur, Number(endWidget?.value ?? cur)), total);
-      const batch = cur === last ? `只跑第 ${cur} 镜` : `本批 ${cur}–${last} 镜`;
-      status.value = `共${total}镜｜${batch}｜时长 ${String(durWidget?.value || csv)}`;
+    _suppressWidgetRefresh = true;
+    try {
+      if (syncCount && endWidget && shots.length) applyWidgetValue(node, endWidget, shots.length);
+      if (durWidget && ((syncDurations && csv) || (!String(durWidget.value || "").trim() && csv))) {
+        applyWidgetValue(node, durWidget, csv);
+      }
+      const start = Number(idxWidget?.value ?? 1);
+      const last = Number(endWidget?.value ?? start);
+      if (idxWidget && start > last) applyWidgetValue(node, idxWidget, last);
+      if (endWidget && Number(endWidget.value) < Number(idxWidget?.value ?? 1)) {
+        applyWidgetValue(node, endWidget, Number(idxWidget.value));
+      }
+    } finally {
+      _suppressWidgetRefresh = false;
     }
+
+    if (status) {
+      if (!shots.length) status.value = "未识别到分镜序列";
+      else {
+        const total = shots.length;
+        const cur = Math.min(Math.max(1, Number(idxWidget?.value ?? 1)), total);
+        const last = Math.min(Math.max(cur, Number(endWidget?.value ?? cur)), total);
+        const batch = cur === last ? `只跑第 ${cur} 镜` : `本批 ${cur}–${last} 镜`;
+        const contW = findWidget(node, "末帧续接");
+        const secW = findWidget(node, "续接秒数");
+        const cont = contW ? (contW.value ? "末帧续接开" : "末帧续接关") : "";
+        let sec = "";
+        if (contW?.value && secW != null) {
+          const v = Number(secW.value);
+          sec = v <= 0 ? "整段" : `末${v}秒`;
+        }
+        status.value = `共${total}镜｜${batch}｜时长 ${String(durWidget?.value || csv)}${cont ? "｜" + cont : ""}${sec ? "｜" + sec : ""}`;
+      }
+    }
+    app.graph?.setDirtyCanvas?.(true, true);
+  } catch (err) {
+    console.error("[ShortDramaJSON] refreshSelectorStatus failed", err);
   }
-  app.graph?.setDirtyCanvas?.(true, true);
 }
 
 function hookRefresh(nodeType, refresh) {
@@ -373,6 +429,15 @@ app.registerExtension({
           if (!node.widgets?.find((w) => w.name === "刷新槽位标签")) {
             node.addWidget("button", "刷新槽位标签", null, () => refreshBinderLabels(node));
           }
+          const cont = findWidget(node, "末帧续接");
+          if (cont) {
+            const prev = cont.callback;
+            cont.callback = (...args) => {
+              const out = prev?.apply(cont, args);
+              refreshBinderLabels(node);
+              return out;
+            };
+          }
           const dur = node.widgets?.find((w) => w.name === "总时长" || w.name === "时长微调");
           if (dur) {
             dur.name = "总时长";
@@ -399,7 +464,7 @@ app.registerExtension({
               refreshSelectorStatus(node, { syncCount: true, syncDurations: true });
             });
           }
-          for (const name of ["开始分镜", "结束分镜", "分镜索引", "分镜结束", "分镜时长"]) {
+          for (const name of ["开始分镜", "结束分镜", "分镜索引", "分镜结束", "分镜时长", "末帧续接", "续接秒数", "prefix_root"]) {
             const w = node.widgets?.find((x) => x.name === name);
             if (!w) continue;
             const prev = w.callback;
